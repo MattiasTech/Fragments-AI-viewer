@@ -103,6 +103,20 @@
     const workerUrl = URL.createObjectURL(new File([workerBlob], "worker.mjs", { type: "text/javascript" }));
     const fragRuntime = new FRAGS.FragmentsModels(workerUrl);
 
+    // Register the fragments runtime with the Components FragmentsManager so
+    // the IfcLoader and other components can find/communicate with it.
+    try {
+      const fragsManager = components.get(OBC.FragmentsManager);
+      if (fragsManager) {
+        // The manager expects a `core` with the fragments runtime API.
+        fragsManager.core = fragRuntime;
+      } else {
+        console.warn('FragmentsManager not found on components; IFC loading may fail.');
+      }
+    } catch (e) {
+      console.warn('Failed to register fragRuntime with Components FragmentsManager', e);
+    }
+
     // Keep Fragments interactions in sync with the Components camera
     if (world && world.camera?.controls && typeof world.camera.controls.addEventListener === 'function') {
       world.camera.controls.addEventListener("rest", () => fragRuntime.update(true));
