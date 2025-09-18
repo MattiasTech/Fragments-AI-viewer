@@ -52,13 +52,10 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       (async () => {
         try {
-          // Try the network first (fast reloads with nav preload if enabled)
           const preload = await event.preloadResponse;
           if (preload) return preload;
-          const network = await fetch(request);
-          return network;
+          return await fetch(request);
         } catch {
-          // Offline: return cached index.html
           const cache = await caches.open(APP_SHELL_CACHE);
           const cached = await cache.match("./index.html");
           return cached || new Response("Offline", { status: 503, statusText: "Offline" });
@@ -91,13 +88,10 @@ self.addEventListener("fetch", (event) => {
         const cached = await cache.match(request);
         const networkPromise = fetch(request)
           .then((resp) => {
-            // Cache successful (CORS/opaque responses are allowed to be cached)
             try { cache.put(request, resp.clone()); } catch {}
             return resp;
           })
           .catch(() => null);
-
-        // Return cached immediately if present; otherwise wait for network
         return cached || (await networkPromise) || new Response("Network error", { status: 502 });
       })()
     );
@@ -108,8 +102,7 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     (async () => {
       try {
-        const resp = await fetch(request);
-        return resp;
+        return await fetch(request);
       } catch {
         const cache = await caches.open(RUNTIME_CACHE);
         const cached = await cache.match(request);
