@@ -5,14 +5,14 @@
   <title>That Open • IFC→Fragments Viewer + UI</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Import map: ONE CDN + pinned versions -->
+  <!-- Import map: ONE CDN + pinned versions (ESM entries) -->
   <script type="importmap">
   {
     "imports": {
       "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js",
       "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.175.0/examples/jsm/",
       "@thatopen/fragments": "https://cdn.jsdelivr.net/npm/@thatopen/fragments@3.1.7/dist/index.mjs",
-      "@thatopen/ui": "https://cdn.jsdelivr.net/npm/@thatopen/ui@3.1.1/dist/index.js",
+      "@thatopen/ui": "https://cdn.jsdelivr.net/npm/@thatopen/ui@3.1.2/dist/index.mjs",
       "web-ifc": "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/web-ifc-api.js"
     }
   }
@@ -34,7 +34,6 @@
     input[type=file] { display:none }
     /* That Open UI panel */
     bim-panel.viewer-panel { position:fixed; left:12px; top:56px; max-width:360px; z-index:11 }
-    .phone-menu-toggler { position:fixed; right:12px; top:56px; z-index:12 }
   </style>
 </head>
 <body>
@@ -54,7 +53,6 @@
     <div id="dropzone"><div style="color:#fff;font:600 16px system-ui">Drop IFC/FRAG here</div></div>
   </div>
 
-  <!-- Optional offline shell caching -->
   <script>
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
   </script>
@@ -73,7 +71,7 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0c0f14);
 
-    let camera = new THREE.PerspectiveCamera(60, 2, 0.1, 10000); // let (we swap to Ortho if user selects)
+    let camera = new THREE.PerspectiveCamera(60, 2, 0.1, 10000);
     camera.position.set(60, 25, -30);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -81,7 +79,6 @@
 
     const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.6); scene.add(hemi);
     const dir  = new THREE.DirectionalLight(0xffffff, 0.6); dir.position.set(50, 80, -30); scene.add(dir);
-
     const grid = new THREE.GridHelper(100, 20); grid.visible = true; scene.add(grid);
 
     function resize() {
@@ -96,172 +93,10 @@
     function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
     animate();
 
-    // ---------- Fragments core + worker (blob pattern) ----------
-    const workerBlob = await (await fetch("https://thatopen.github.io/engine_fragment/resources/worker.mjs")).blob();
-    const workerUrl = URL.createObjectURL(new File([workerBlob], "worker.mjs", { type: "text/javascript" }));
-    const fragments = new FRAGS.FragmentsModels(workerUrl);
-    controls.addEventListener("end", () => fragments.update(true));
-
-    // Add models to the scene as soon as they're created
-    fragments.models.list.onItemSet.add(({ value: model }) => {
-      model.useCamera(camera);
-      scene.add(model.object);
-      fitToScene(); // focus on the new model
-      fragments.update(true);
-      updateStats();
-    });
-
-    // ---------- IFC → Fragments importer ----------
-    const importer = new FRAGS.IfcImporter();
-    importer.wasm = { absolute: true, path: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/" }; // trailing slash is important
-
-    // ---------- I/O ----------
-    const fileInput = document.getElementById("file");
-    const downloadBtn = document.getElementById("downloadFrag");
-    let lastFragBuffer = null;
-
-    async function loadFRAGBuffer(buffer, name) {
-      await fragments.load(buffer, { modelId: name });
-      await fragments.update(true);
-    }
-
-    async function convertIFCToFRAG(file) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const fragBytes = await importer.process({
-        bytes,
-        progressCallback: (p) => console.log("IFC→Fragments progress:", p),
-      });
-      lastFragBuffer = fragBytes;
-      downloadBtn.disabled = false;
-      await loadFRAGBuffer(fragBytes, file.name.replace(/\.[^/.]+$/, ""));
-    }
-
-    fileInput.addEventListener("change", async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      if (/\.frag$/i.test(file.name)) {
-        await loadFRAGBuffer(await file.arrayBuffer(), file.name.replace(/\.[^/.]+$/, ""));
-      } else if (/\.ifc$/i.test(file.name)) {
-        await convertIFCToFRAG(file);
-      } else {
-        alert("Please choose an .ifc or .frag file.");
-      }
-      fileInput.value = "";
-    });
-
-    // Drag & drop
-    const stage = document.getElementById("stage");
-    const dropzone = document.getElementById("dropzone");
-    ["dragenter","dragover"].forEach(ev => stage.addEventListener(ev, (e) => {
-      e.preventDefault(); dropzone.classList.add("active");
-    }));
-    ["dragleave","drop"].forEach(ev => stage.addEventListener(ev, (e) => {
-      e.preventDefault(); dropzone.classList.remove("active");
-    }));
-    stage.addEventListener("drop", async (e) => {
-      const file = e.dataTransfer.files?.[0]; if (!file) return;
-      if (/\.frag$/i.test(file.name)) {
-        await loadFRAGBuffer(await file.arrayBuffer(), file.name.replace(/\.[^/.]+$/, ""));
-      } else if (/\.ifc$/i.test(file.name)) {
-        await convertIFCToFRAG(file);
-      } else {
-        alert("Drop an .ifc or .frag file.");
-      }
-    });
-
-    downloadBtn.addEventListener("click", () => {
-      if (!lastFragBuffer) return;
-      const file = new File([lastFragBuffer], "model.frag");
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(file);
-      a.download = file.name;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    });
-
-    // ---------- Utility: fit, stats, toggles ----------
-    function sceneBounds() {
-      const box = new THREE.Box3();
-      // Correct iteration: list.forEach gives you the MODEL, not [key, model]
-      fragments.models.list.forEach((model) => box.expandByObject(model.object));
-      return box;
-    }
-
-    function fitToScene() {
-      const box = sceneBounds();
-      if (box.isEmpty()) return;
-      const size = box.getSize(new THREE.Vector3()).length();
-      const center = box.getCenter(new THREE.Vector3());
-      const fitDist = Math.max(size * 1.1, 10);
-      const dir = new THREE.Vector3(1, 0.6, -1).normalize();
-      camera.position.copy(center.clone().add(dir.multiplyScalar(fitDist)));
-      controls.target.copy(center);
-      camera.near = Math.max(0.1, size / 1000);
-      camera.far = Math.max(2000, size * 5);
-      camera.updateProjectionMatrix();
-    }
-
-    function setProjection(mode) {
-      if (mode === "persp" && !(camera instanceof THREE.PerspectiveCamera)) {
-        const persp = new THREE.PerspectiveCamera(60, camera.aspect, camera.near, camera.far);
-        persp.position.copy(camera.position); persp.lookAt(controls.target);
-        camera = persp; controls.object = camera; fitToScene();
-      }
-      if (mode === "ortho" && !(camera instanceof THREE.OrthographicCamera)) {
-        const box = sceneBounds(); const size = box.getSize(new THREE.Vector3());
-        const d = Math.max(size.x, size.y, size.z) || 10;
-        const ortho = new THREE.OrthographicCamera(-d, d, d, -d, 0.01, 100000);
-        ortho.position.copy(camera.position); ortho.lookAt(controls.target);
-        camera = ortho; controls.object = camera; fitToScene();
-      }
-    }
-
-    function setWireframe(on) {
-      fragments.models.list.forEach((m) => {
-        m.object.traverse(obj => {
-          if (obj.isMesh && obj.material) {
-            if (Array.isArray(obj.material)) obj.material.forEach(mat => mat.wireframe = on);
-            else obj.material.wireframe = on;
-          }
-        });
-      });
-    }
-
-    function setBackground(kind) {
-      if (kind === "dark") scene.background = new THREE.Color(0x0c0f14);
-      if (kind === "light") scene.background = new THREE.Color(0xf3f5f8);
-      if (kind === "checker") {
-        const size = 512, data = new Uint8Array(3 * size * size);
-        for (let y=0;y<size;y++) for (let x=0;x<size;x++) {
-          const i = (y*size + x)*3; const c = ((x>>5)&1) ^ ((y>>5)&1) ? 230 : 200;
-          data[i]=data[i+1]=data[i+2]=c;
-        }
-        const tex = new THREE.DataTexture(data, size, size, THREE.RGBFormat);
-        tex.needsUpdate = true; tex.repeat.set(10,10); tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        scene.background = tex;
-      }
-    }
-
-    function updateStats() {
-      let meshes = 0, tris = 0;
-      fragments.models.list.forEach((m) => {
-        m.object.traverse(o => {
-          if (o.isMesh && o.geometry) {
-            meshes++;
-            const triCount = o.geometry.index
-              ? o.geometry.index.count / 3
-              : o.geometry.attributes.position.count / 3;
-            tris += triCount;
-          }
-        });
-      });
-      statsLabel.value = `Meshes: ${meshes.toLocaleString()} • Tris: ${tris.toLocaleString()}`;
-    }
-
-    // ---------- That Open UI: panel & controls ----------
+    // ---------- That Open UI: build panel FIRST ----------
     BUI.Manager.init();
 
-    const [panel] = BUI.Component.create(BUI.Panel, (p) => BUI.html`
+    const [panel] = BUI.Component.create(BUI.Panel, () => BUI.html`
       <bim-panel class="viewer-panel" label="Viewer Controls" active>
         <bim-panel-section label="Load">
           <bim-label style="white-space:normal">
@@ -269,10 +104,8 @@
           </bim-label>
           <bim-toolbar>
             <bim-toolbar-group>
-              <bim-button @click=${() => fileInput.click()} icon="mdi:file-upload">Open file…</bim-button>
-              <bim-button ?disabled=${!lastFragBuffer} @click=${() => downloadBtn.click()} icon="mdi:download">
-                Download .frag
-              </bim-button>
+              <bim-button id="openBtn" icon="mdi:file-upload">Open file…</bim-button>
+              <bim-button id="dlBtn" icon="mdi:download" disabled>Download .frag</bim-button>
             </bim-toolbar-group>
           </bim-toolbar>
         </bim-panel-section>
@@ -280,8 +113,8 @@
         <bim-panel-section label="Navigation">
           <bim-toolbar>
             <bim-toolbar-group>
-              <bim-button @click=${fitToScene} icon="mdi:focus-field">Fit to model</bim-button>
-              <bim-button @click=${() => { controls.reset(); fitToScene(); }} icon="mdi:undo-variant">Reset view</bim-button>
+              <bim-button id="fitBtn" icon="mdi:focus-field">Fit to model</bim-button>
+              <bim-button id="resetBtn" icon="mdi:undo-variant">Reset view</bim-button>
             </bim-toolbar-group>
             <bim-toolbar-group>
               <bim-selector id="projSel" label="Projection" value="persp">
@@ -313,15 +146,80 @@
     `);
     document.body.append(panel);
 
-    // Hook up UI elements
+    // Grab UI refs now (so they're defined before any callbacks)
     const statsLabel = panel.querySelector("#statsLabel");
+    panel.querySelector("#openBtn").addEventListener("click", () => document.getElementById("file").click());
+    panel.querySelector("#dlBtn").addEventListener("click", () => document.getElementById("downloadFrag").click());
+    panel.querySelector("#fitBtn").addEventListener("click", fitToScene);
+    panel.querySelector("#resetBtn").addEventListener("click", () => { controls.reset(); fitToScene(); });
     panel.querySelector("#projSel").addEventListener("change", e => setProjection(e.target.value));
     panel.querySelector("#wireCbx").addEventListener("change", e => setWireframe(e.target.checked));
     panel.querySelector("#gridCbx").addEventListener("change", e => grid.visible = e.target.checked);
     panel.querySelector("#bgSel").addEventListener("change", e => setBackground(e.target.value));
 
-    // Initial background
-    setBackground("dark");
-  </script>
-</body>
-</html>
+    // ---------- Fragments core + worker (blob pattern) ----------
+    const workerBlob = await (await fetch("https://thatopen.github.io/engine_fragment/resources/worker.mjs")).blob();
+    const workerUrl = URL.createObjectURL(new File([workerBlob], "worker.mjs", { type: "text/javascript" }));
+    const fragments = new FRAGS.FragmentsModels(workerUrl);
+    controls.addEventListener("end", () => fragments.update(true));
+
+    // When a model is added, attach to scene and update stats
+    fragments.models.list.onItemSet.add(({ value: model }) => {
+      model.useCamera(camera);
+      scene.add(model.object);
+      fitToScene();
+      fragments.update(true);
+      updateStats();
+    });
+
+    // ---------- IFC → Fragments importer ----------
+    const importer = new FRAGS.IfcImporter();
+    importer.wasm = { absolute: true, path: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/" }; // trailing slash!
+
+    // ---------- I/O ----------
+    const fileInput = document.getElementById("file");
+    const downloadBtn = document.getElementById("downloadFrag");
+    let lastFragBuffer = null;
+
+    async function loadFRAGBuffer(buffer, name) {
+      await fragments.load(buffer, { modelId: name });
+      await fragments.update(true);
+    }
+
+    async function convertIFCToFRAG(file) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const fragBytes = await importer.process({
+        bytes,
+        progressCallback: (p) => console.log("IFC→Fragments progress:", p),
+      });
+      lastFragBuffer = fragBytes;
+      downloadBtn.disabled = false;
+      panel.querySelector("#dlBtn").disabled = false;
+      await loadFRAGBuffer(fragBytes, file.name.replace(/\.[^/.]+$/, ""));
+    }
+
+    fileInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (/\.frag$/i.test(file.name)) {
+        await loadFRAGBuffer(await file.arrayBuffer(), file.name.replace(/\.[^/.]+$/, ""));
+      } else if (/\.ifc$/i.test(file.name)) {
+        await convertIFCToFRAG(file);
+      } else {
+        alert("Please choose an .ifc or .frag file.");
+      }
+      fileInput.value = "";
+    });
+
+    // Drag & drop
+    const stage = document.getElementById("stage");
+    const dropzone = document.getElementById("dropzone");
+    ["dragenter","dragover"].forEach(ev => stage.addEventListener(ev, (e) => {
+      e.preventDefault(); dropzone.classList.add("active");
+    }));
+    ["dragleave","drop"].forEach(ev => stage.addEventListener(ev, (e) => {
+      e.preventDefault(); dropzone.classList.remove("active");
+    }));
+    stage.addEventListener("drop", async (e) => {
+      const file = e.dataTransfer.files?.[0]; if (!file) return;
+      if (/\.frag$/i.test(file
