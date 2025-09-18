@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>IFC → Fragments Viewer (That Open)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html, body { height: 100%; margin: 0; }
+      #app { position: fixed; inset: 0; display: grid; grid-template-rows: auto 1fr; }
+      header { padding: .5rem .75rem; display: flex; gap: .5rem; align-items: center; background: #111; color: #fff; }
+      header a { color: #9cf; text-decoration: none; }
+      header .spacer { flex: 1 }
+      #viewer { position: relative; height: 100%; }
+      #dropzone {
+        position: absolute; inset: 0; border: 2px dashed rgba(255,255,255,.25);
+        display: grid; place-items: center; pointer-events: none; opacity: 0; transition: .2s;
+      }
+      #dropzone.active { opacity: 1; background: rgba(0,0,0,.25); }
+      .hidden { display: none; }
+      /* Minimal tweaks for @thatopen/ui panel on small screens */
+      bim-panel.options-menu { position: absolute; left: 1rem; top: 1rem; max-width: 360px; }
+      .phone-menu-toggler { position: absolute; right: 1rem; top: 1rem; z-index: 10; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <strong>That Open • IFC→Fragments Viewer</strong>
+        <span class="spacer"></span>
+        <label>
+          <input id="file" type="file" accept=".ifc,.IFC,.frag,.FRAG" class="hidden" />
+          <span style="cursor:pointer;border:1px solid #fff;padding:.25rem .5rem;border-radius:.25rem">Open IFC/FRAG…</span>
+        </label>
+        <button id="downloadFrag" disabled title="Download last converted .frag"
+          style="margin-left:.5rem">Download .frag</button>
+        <a href="https://docs.thatopen.com/" target="_blank" rel="noopener" style="margin-left:.5rem">Docs</a>
+      </header>
+      <div id="viewer">
+        <div id="container" style="width:100%;height:100%"></div>
+        <div id="dropzone"><div style="color:#fff;font:600 16px system-ui">Drop IFC/FRAG here</div></div>
+      </div>
+    </div>
+
+    <script type="module">
+      // Import latest packages from CDN (ESM).
+      // Using esm.sh keeps import paths pure ESM in the browser.
+      import * as THREE from "https://esm.sh/three@latest";
+      import * as OBC   from "https://esm.sh/@thatopen/components@latest";
+      import * as BUI   from "https://esm.sh/@thatopen/ui@latest";
+      import * as FRAGS from "https://esm.sh/@thatopen/fragments@latest";
+
+      // ---- Boot service worker (cache app shell for repeat visits) ----
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').catch(console.warn);
+      }
+
+      // ---- Build a minimal world with That Open Components ----
+      const components = new OBC.Components();
+      const worlds = components.get(OBC.Worlds);
+      const world = worlds.create(OBC.SimpleScene, OBC.SimpleCamera, OBC.SimpleRenderer);
+
+      world.scene = new OBC.SimpleScene(components);
+      world.scene.setup();
+      world.scene.three.background = null;
+
+      const container = document.getElementById("container");
+      world.renderer = new OBC.SimpleRenderer(components, container);
+      world.camera = new OBC.SimpleCamera(components);
+      world.camera.controls.setLookAt(60, 25, -30, 0, 0, 0);
+
+      const grids = components.get(OBC.Grids);
+      grids.create(world);
+      components.init();
+
+      // ---- Set up Fragments core + worker (blob URL pattern from docs) ----
+      const workerResponse = await fetch("https://thatopen.github.io/engine_fragment/resources/worker.mjs");
+      const workerBlob = await workerResponse.blob();
+      const workerUrl = URL.createObjectURL(new File([workerBlob], "worker.mjs", { type: "text/javascript" }));
+      const fragments = new FRAGS.FragmentsModels(workerUrl);
+      world.camera.controls.addEventListener("rest", () => fragments.update(true)); // update when camera stops
+      fragments.models.list.onItemSet.add(({ value: model }) => {
+        model.useCamera(world.camera.three);
+        world.scene.three.add(model.object);
+        fragments.update(true);
+      });
+
+      // ---- IfcImporter (browser), pointing to web-ifc WASM on a CDN ----
+      const importer = new FRAGS.IfcImporter();
+      // Path must end with a trailing slash; using a CDN keeps Pages simple.
+      importer.wasm = { absolute: true, path: "https://unpkg.com/web-ifc@0.0.69/" }; // per tutorial example
+      // (You can bump to newer web-ifc if desired.)
+
+      // ---- UI & file handling ----
+      BUI.Manager.init();
+      const fileInput = document.getElementById("file");
+      const downloadBtn = document.getElementById("downloadFrag");
+      let lastFragBuffer = null;
+
+      async function loadFRAGFromBytes(buffer, name = "model") {
+        await fragments.load(buffer, { modelId: name });
+        await fragments.update(true);
+      }
+
+      async function convertIFCToFragments(file) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const fragBytes = await importer.process({
+          bytes,
+          progressCallback: (p) => console.log("IFC→Fragments progress:", p),
+        });
+        lastFragBuffer = fragBytes;
+        downloadBtn.disabled = false;
+        await loadFRAGFromBytes(fragBytes, file.name.replace(/\.[^/.]+$/, ""));
+      }
+
+      fileInput.addEventListener("change", async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (file.name.match(/\.frag$/i)) {
+          const buf = await file.arrayBuffer();
+          await loadFRAGFromBytes(buf, file.name.replace(/\.[^/.]+$/, ""));
+        } else if (file.name.match(/\.ifc$/i)) {
+          await convertIFCToFragments(file);
+        } else {
+          alert("Please choose an .ifc or .frag file.");
+        }
+        fileInput.value = "";
+      });
+
+      // Drag & drop
+      const dropzone = document.getElementById("dropzone");
+      const viewer = document.getElementById("viewer");
+      ["dragenter","dragover"].forEach(ev => viewer.addEventListener(ev, (e) => {
+        e.preventDefault(); dropzone.classList.add("active");
+      }));
+      ["dragleave","drop"].forEach(ev => viewer.addEventListener(ev, (e) => {
+        e.preventDefault(); dropzone.classList.remove("active");
+      }));
+      viewer.addEventListener("drop", async (e) => {
+        const file = e.dataTransfer.files?.[0];
+        if (!file) return;
+        if (/\.frag$/i.test(file.name)) {
+          const buf = await file.arrayBuffer();
+          await loadFRAGFromBytes(buf, file.name.replace(/\.[^/.]+$/, ""));
+        } else if (/\.ifc$/i.test(file.name)) {
+          await convertIFCToFragments(file);
+        } else {
+          alert("Drop an .ifc or .frag file.");
+        }
+      });
+
+      // Download last converted .frag
+      downloadBtn.addEventListener("click", () => {
+        if (!lastFragBuffer) return;
+        const file = new File([lastFragBuffer], "model.frag");
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(file);
+        a.download = file.name;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      });
+
+      // Optional: tiny menu toggle on phones (using @thatopen/ui)
+      const [panel] = BUI.Component.create(BUI.PanelSection, (_) => BUI.html`
+        <bim-panel class="options-menu" active label="Controls">
+          <bim-panel-section label="Load">
+            <bim-label style="white-space:normal">
+              Open an <b>IFC</b> to convert locally, or a <b>FRAG</b> to view.
+            </bim-label>
+            <bim-label style="white-space:normal">
+              Worker &amp; WASM served from That Open/CDNs (see console).
+            </bim-label>
+          </bim-panel-section>
+        </bim-panel>
+      `);
+      document.body.append(panel);
+
+      const toggleBtn = BUI.Component.create(BUI.PanelSection, () => {
+        const onClick = () => {
+          panel.classList.toggle("options-menu-visible");
+          panel.classList.toggle("options-menu");
+        };
+        return BUI.html`<bim-button class="phone-menu-toggler" icon="solar:settings-bold" @click=${onClick}></bim-button>`;
+      });
+      document.body.append(toggleBtn);
+    </script>
+  </body>
+</html>
