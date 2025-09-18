@@ -2,32 +2,37 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>IFC → Fragments (That Open) • GitHub Pages</title>
+  <title>That Open • IFC→Fragments Viewer + UI</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Import map: pin ONE CDN (jsDelivr) and exact versions -->
+
+  <!-- Import map: ONE CDN + pinned versions -->
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/",
-      "@thatopen/fragments": "https://cdn.jsdelivr.net/npm/@thatopen/fragments@3.1.7/dist/index.js"
+      "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.175.0/examples/jsm/",
+      "@thatopen/fragments": "https://cdn.jsdelivr.net/npm/@thatopen/fragments@3.1.7/dist/index.js",
+      "@thatopen/ui": "https://cdn.jsdelivr.net/npm/@thatopen/ui@3.1.2/dist/index.js"
     }
   }
   </script>
   <style>
-    html, body { height: 100%; margin: 0; }
-    body { background: #0c0f14; color: #e6eefc; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    header { position: fixed; inset: 0 0 auto 0; display:flex; gap:.5rem; align-items:center; padding:.5rem .75rem; background:#0b1120; border-bottom:1px solid #1f2a44; z-index:10 }
+    :root { --bg:#0c0f14; --fg:#e6eefc; --panel:#0b1120; --border:#1f2a44; }
+    html, body { height:100%; margin:0; }
+    body { background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { position:fixed; inset:0 0 auto 0; display:flex; gap:.5rem; align-items:center;
+             padding:.5rem .75rem; background:var(--panel); border-bottom:1px solid var(--border); z-index:10 }
     header strong { letter-spacing:.2px }
     header .spacer { flex:1 }
     header .btn { cursor:pointer; border:1px solid #2a3a64; background:#121a2b; color:#cde; padding:.3rem .55rem; border-radius:.35rem; }
-    #stage { position: fixed; inset: 40px 0 0 0; }
-    #dropzone {
-      position: absolute; inset: 0; border: 2px dashed rgba(255,255,255,.25);
-      display: grid; place-items: center; pointer-events: none; opacity: 0; transition: .2s;
-    }
-    #dropzone.active { opacity: 1; background: rgba(0,0,0,.25); }
+    #stage { position:fixed; inset:40px 0 0 0; }
+    #dropzone { position:absolute; inset:0; border:2px dashed rgba(255,255,255,.25);
+                display:grid; place-items:center; pointer-events:none; opacity:0; transition:.2s; }
+    #dropzone.active { opacity:1; background:rgba(0,0,0,.25); }
     input[type=file] { display:none }
+    /* Place the That Open UI panel */
+    bim-panel.viewer-panel { position:fixed; left:12px; top:56px; max-width:360px; z-index:11 }
+    .phone-menu-toggler { position:fixed; right:12px; top:56px; z-index:12 }
   </style>
 </head>
 <body>
@@ -47,12 +52,18 @@
     <div id="dropzone"><div style="color:#fff;font:600 16px system-ui">Drop IFC/FRAG here</div></div>
   </div>
 
+  <!-- Optional offline shell caching -->
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  </script>
+
   <script type="module">
     import * as THREE from "three";
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
     import * as FRAGS from "@thatopen/fragments";
+    import * as BUI from "@thatopen/ui";
 
-    // --- Three.js scene ---
+    // ---------- Three.js scene ----------
     const canvas = document.getElementById("c");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -60,50 +71,50 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0c0f14);
 
-    const camera = new THREE.PerspectiveCamera(60, 2, 0.1, 10_000);
+    const camera = new THREE.PerspectiveCamera(60, 2, 0.1, 10000);
     camera.position.set(60, 25, -30);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.addEventListener("end", () => fragments.update(true));
+    controls.enableDamping = true;
 
-    // Lights
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.6);
-    scene.add(hemi);
-    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
-    dir.position.set(50, 80, -30);
-    scene.add(dir);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.6); scene.add(hemi);
+    const dir  = new THREE.DirectionalLight(0xffffff, 0.6); dir.position.set(50, 80, -30); scene.add(dir);
+
+    const grid = new THREE.GridHelper(100, 20); grid.visible = true; scene.add(grid);
 
     function resize() {
-      const { clientWidth: w, clientHeight: h } = renderer.domElement.parentElement;
+      const p = renderer.domElement.parentElement;
+      const w = p.clientWidth, h = p.clientHeight;
       camera.aspect = w / h; camera.updateProjectionMatrix();
       renderer.setSize(w, h, false);
     }
     new ResizeObserver(resize).observe(document.getElementById("stage"));
     resize();
 
-    function animate(t=0){ requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
+    function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
     animate();
 
-    // --- Fragments core + worker (official blob-worker pattern) ---
-    // Source: docs tutorial shows fetching That Open’s hosted worker and using a Blob URL.
-    // https://thatopen.github.io/engine_fragment/resources/worker.mjs
+    // ---------- Fragments core + worker (blob pattern from docs) ----------
     const workerBlob = await (await fetch("https://thatopen.github.io/engine_fragment/resources/worker.mjs")).blob();
     const workerUrl = URL.createObjectURL(new File([workerBlob], "worker.mjs", { type: "text/javascript" }));
     const fragments = new FRAGS.FragmentsModels(workerUrl);
+    controls.addEventListener("end", () => fragments.update(true));
 
-    // Add any model to the scene as soon as it’s ready
+    // Add models to the scene as soon as they're created
     fragments.models.list.onItemSet.add(({ value: model }) => {
       model.useCamera(camera);
       scene.add(model.object);
+      fitToScene(); // focus on the new model
       fragments.update(true);
+      updateStats();
     });
 
-    // --- IFC → Fragments importer (browser) ---
+    // ---------- IFC → Fragments importer ----------
     const importer = new FRAGS.IfcImporter();
-    // Use the exact web-ifc path/version from the docs tutorial (with trailing slash).
-    importer.wasm = { absolute: true, path: "https://unpkg.com/web-ifc@0.0.69/" };
+    importer.wasm = { absolute: true, path: "https://unpkg.com/web-ifc@0.0.69/" }; // per tutorial
+    // (Keep the exact path to avoid WASM/JS binding errors.)
 
-    // --- I/O helpers ---
+    // ---------- I/O ----------
     const fileInput = document.getElementById("file");
     const downloadBtn = document.getElementById("downloadFrag");
     let lastFragBuffer = null;
@@ -157,7 +168,6 @@
       }
     });
 
-    // Download last converted .frag
     downloadBtn.addEventListener("click", () => {
       if (!lastFragBuffer) return;
       const file = new File([lastFragBuffer], "model.frag");
@@ -167,6 +177,148 @@
       a.click();
       URL.revokeObjectURL(a.href);
     });
+
+    // ---------- Utility: fit, stats, toggles ----------
+    function sceneBounds() {
+      const box = new THREE.Box3();
+      // include all Fragments models
+      for (const [, model] of fragments.models.list) box.expandByObject(model.object);
+      return box;
+    }
+
+    function fitToScene() {
+      const box = sceneBounds();
+      if (box.isEmpty()) return;
+      const size = box.getSize(new THREE.Vector3()).length();
+      const center = box.getCenter(new THREE.Vector3());
+      const fitDist = Math.max(size * 1.1, 10);
+      const dir = new THREE.Vector3(1, 0.6, -1).normalize();
+      camera.position.copy(center.clone().add(dir.multiplyScalar(fitDist)));
+      controls.target.copy(center);
+      camera.near = Math.max(0.1, size / 1000);
+      camera.far = Math.max(2000, size * 5);
+      camera.updateProjectionMatrix();
+    }
+
+    function setProjection(mode) {
+      if (mode === "persp" && !(camera instanceof THREE.PerspectiveCamera)) {
+        const persp = new THREE.PerspectiveCamera(60, camera.aspect, camera.near, camera.far);
+        persp.position.copy(camera.position); persp.lookAt(controls.target);
+        camera = persp; controls.object = camera; fitToScene();
+      }
+      if (mode === "ortho" && !(camera instanceof THREE.OrthographicCamera)) {
+        const box = sceneBounds(); const size = box.getSize(new THREE.Vector3());
+        const d = Math.max(size.x, size.y, size.z) || 10;
+        const ortho = new THREE.OrthographicCamera(-d, d, d, -d, 0.01, 100000);
+        ortho.position.copy(camera.position); ortho.lookAt(controls.target);
+        camera = ortho; controls.object = camera; fitToScene();
+      }
+    }
+
+    function setWireframe(on) {
+      fragments.models.list.forEach(([, m]) => {
+        m.object.traverse(obj => {
+          if (obj.isMesh && obj.material) {
+            if (Array.isArray(obj.material)) obj.material.forEach(mat => mat.wireframe = on);
+            else obj.material.wireframe = on;
+          }
+        });
+      });
+    }
+
+    function setBackground(kind) {
+      if (kind === "dark") scene.background = new THREE.Color(0x0c0f14);
+      if (kind === "light") scene.background = new THREE.Color(0xf3f5f8);
+      if (kind === "checker") {
+        const size = 512, data = new Uint8Array(3 * size * size);
+        for (let y=0;y<size;y++) for (let x=0;x<size;x++) {
+          const i = (y*size + x)*3; const c = ((x>>5)&1) ^ ((y>>5)&1) ? 230 : 200;
+          data[i]=data[i+1]=data[i+2]=c;
+        }
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBFormat);
+        tex.needsUpdate = true; tex.repeat.set(10,10); tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        scene.background = tex;
+      }
+    }
+
+    function updateStats() {
+      let meshes = 0, tris = 0;
+      fragments.models.list.forEach(([, m]) => {
+        m.object.traverse(o => {
+          if (o.isMesh && o.geometry) {
+            meshes++;
+            const geom = o.geometry.index ? o.geometry.index.count/3 : o.geometry.attributes.position.count/3;
+            tris += geom;
+          }
+        });
+      });
+      statsLabel.value = `Meshes: ${meshes.toLocaleString()} • Tris: ${tris.toLocaleString()}`;
+    }
+
+    // ---------- That Open UI: panel & controls ----------
+    BUI.Manager.init();
+
+    const [panel] = BUI.Component.create(BUI.Panel, (p) => BUI.html`
+      <bim-panel class="viewer-panel" label="Viewer Controls" active>
+        <bim-panel-section label="Load">
+          <bim-label style="white-space:normal">
+            Open an <b>IFC</b> to convert locally, or a <b>FRAG</b> to view.
+          </bim-label>
+          <bim-toolbar>
+            <bim-toolbar-group>
+              <bim-button @click=${() => fileInput.click()} icon="mdi:file-upload">Open file…</bim-button>
+              <bim-button ?disabled=${!lastFragBuffer} @click=${() => downloadBtn.click()} icon="mdi:download">
+                Download .frag
+              </bim-button>
+            </bim-toolbar-group>
+          </bim-toolbar>
+        </bim-panel-section>
+
+        <bim-panel-section label="Navigation">
+          <bim-toolbar>
+            <bim-toolbar-group>
+              <bim-button @click=${fitToScene} icon="mdi:focus-field">Fit to model</bim-button>
+              <bim-button @click=${() => { controls.reset(); fitToScene(); }} icon="mdi:undo-variant">Reset view</bim-button>
+            </bim-toolbar-group>
+            <bim-toolbar-group>
+              <bim-selector id="projSel" label="Projection" value="persp">
+                <bim-option value="persp">Perspective</bim-option>
+                <bim-option value="ortho">Orthographic</bim-option>
+              </bim-selector>
+              <bim-checkbox id="wireCbx" label="Wireframe"></bim-checkbox>
+              <bim-checkbox id="gridCbx" label="Grid" checked></bim-checkbox>
+            </bim-toolbar-group>
+          </bim-toolbar>
+        </bim-panel-section>
+
+        <bim-panel-section label="Appearance">
+          <bim-toolbar>
+            <bim-toolbar-group>
+              <bim-selector id="bgSel" label="Background" value="dark">
+                <bim-option value="dark">Dark</bim-option>
+                <bim-option value="light">Light</bim-option>
+                <bim-option value="checker">Checker</bim-option>
+              </bim-selector>
+            </bim-toolbar-group>
+          </bim-toolbar>
+        </bim-panel-section>
+
+        <bim-panel-section label="Stats">
+          <bim-label id="statsLabel">Meshes: 0 • Tris: 0</bim-label>
+        </bim-panel-section>
+      </bim-panel>
+    `);
+    document.body.append(panel);
+
+    // Hook up UI elements
+    const statsLabel = panel.querySelector("#statsLabel");
+    panel.querySelector("#projSel").addEventListener("change", e => setProjection(e.target.value));
+    panel.querySelector("#wireCbx").addEventListener("change", e => setWireframe(e.target.checked));
+    panel.querySelector("#gridCbx").addEventListener("change", e => grid.visible = e.target.checked);
+    panel.querySelector("#bgSel").addEventListener("change", e => setBackground(e.target.value));
+
+    // Initial background
+    setBackground("dark");
   </script>
 </body>
 </html>
