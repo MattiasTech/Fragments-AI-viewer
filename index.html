@@ -165,42 +165,49 @@
       console.warn('BUIOBC.setComponents is not available on the imported ui-obc bundle; skipping OBC binding.');
     }
 
-    const [panel] = BUI.Component.create(BUI.Panel, () => BUI.html`
-      <bim-panel class="viewer-panel" label="Viewer Controls" active>
-        <bim-panel-section label="Load">
-          <bim-label style="white-space:normal">
-            Open an <b>IFC</b> (converted locally) or a prebuilt <b>FRAG</b> file.
-          </bim-label>
-          <bim-toolbar>
-            <bim-toolbar-group>
-              <bim-button id="openBtn" icon="mdi:file-upload">Open IFC/FRAG…</bim-button>
-            </bim-toolbar-group>
-          </bim-toolbar>
-        </bim-panel-section>
+    // The library helper `BUI.Component.create(...)` attempted to invoke a
+    // class constructor as a function in some environments which throws
+    // "Class constructor Fi cannot be invoked without 'new'". To avoid that
+    // we build the panel using DOM APIs and the custom elements directly.
+    const panel = document.createElement('bim-panel');
+    panel.className = 'viewer-panel';
+    panel.setAttribute('label', 'Viewer Controls');
+    panel.setAttribute('active', '');
 
-        <bim-panel-section label="Navigation">
-          <bim-toolbar>
-            <bim-toolbar-group>
-              <bim-button id="fitBtn"  icon="mdi:focus-field">Fit to model</bim-button>
-              <bim-button id="homeBtn" icon="mdi:undo-variant">Reset view</bim-button>
-            </bim-toolbar-group>
-            <bim-toolbar-group>
-              <bim-selector id="projSel" label="Projection" value="persp">
-                <bim-option value="persp">Perspective</bim-option>
-                <bim-option value="ortho">Orthographic</bim-option>
-              </bim-selector>
-              <bim-checkbox id="gridCbx" label="Grid" checked></bim-checkbox>
-              <bim-checkbox id="wireCbx" label="Wireframe"></bim-checkbox>
-            </bim-toolbar-group>
-          </bim-toolbar>
-        </bim-panel-section>
+    panel.innerHTML = `
+      <bim-panel-section label="Load">
+        <bim-label style="white-space:normal">
+          Open an <b>IFC</b> (converted locally) or a prebuilt <b>FRAG</b> file.
+        </bim-label>
+        <bim-toolbar>
+          <bim-toolbar-group>
+            <bim-button id="openBtn" icon="mdi:file-upload">Open IFC/FRAG…</bim-button>
+          </bim-toolbar-group>
+        </bim-toolbar>
+      </bim-panel-section>
 
-        <bim-panel-section label="Stats">
-          <bim-label id="statsLabel">Meshes: 0 • Tris: 0</bim-label>
-        </bim-panel-section>
-      </bim-panel>
-    `);
-    document.body.append(panel);
+      <bim-panel-section label="Navigation">
+        <bim-toolbar>
+          <bim-toolbar-group>
+            <bim-button id="fitBtn"  icon="mdi:focus-field">Fit to model</bim-button>
+            <bim-button id="homeBtn" icon="mdi:undo-variant">Reset view</bim-button>
+          </bim-toolbar-group>
+          <bim-toolbar-group>
+            <bim-selector id="projSel" label="Projection" value="persp">
+              <bim-option value="persp">Perspective</bim-option>
+              <bim-option value="ortho">Orthographic</bim-option>
+            </bim-selector>
+            <bim-checkbox id="gridCbx" label="Grid" checked></bim-checkbox>
+            <bim-checkbox id="wireCbx" label="Wireframe"></bim-checkbox>
+          </bim-toolbar-group>
+        </bim-toolbar>
+      </bim-panel-section>
+
+      <bim-panel-section label="Stats">
+        <bim-label id="statsLabel">Meshes: 0 • Tris: 0</bim-label>
+      </bim-panel-section>
+    `;
+    document.body.appendChild(panel);
 
     // UI refs
     const fileInput  = document.getElementById("file");
