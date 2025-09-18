@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>That Open • Components Viewer (IFC + FRAG)</title>
+  <title>Fragments Viewer (IFC + FRAG)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- One CDN + pinned, compatible versions -->
@@ -46,7 +46,7 @@
 </head>
 <body>
   <header>
-    <strong>That Open • Components Viewer</strong>
+    <strong>Fragments Viewer</strong>
     <span class="spacer"></span>
     <label class="btn">
       <input id="file" type="file" accept=".ifc,.IFC,.frag,.FRAG" />
@@ -78,128 +78,66 @@
     import * as OBC   from "@thatopen/components";
     import * as FRAGS from "@thatopen/fragments";
     import * as BUI     from "@thatopen/ui";
-    import * as BUIOBC  from "@thatopen/ui-obc";
 
-    // -------- Components world (scene/camera/renderer) --------
-    const components = new OBC.Components();
-    const worlds = components.get(OBC.Worlds);
-    const world  = worlds.create(OBC.SimpleScene, OBC.SimpleCamera, OBC.SimpleRenderer);
+    // Warn when opened directly from file:// where Web Workers will fail
+    if (location.protocol === "file:") {
+      const msg = [
+        "This viewer uses Web Workers and WASM, which cannot run from file://.",
+        "Please serve this folder over HTTP and open via http://localhost.",
+        "",
+        "Quick options (run in PowerShell from this folder):",
+        "  • Python 3:  python -m http.server 8080",
+        "  • Node.js:   npx http-server -p 8080",
+        "",
+        "Then open: http://localhost:8080/index.html",
+      ].join("\n");
+      alert(msg);
+    }
 
+    // --- Core Setup ---
     const container = document.getElementById("container");
+    const components = new OBC.Components();
+
+    // 1. Set up Fragments and IFC Loader BEFORE initializing components
+    const fragments = new FRAGS.FragmentsModels();
+    const ifcLoader = components.get(OBC.IfcLoader);
+
+    ifcLoader.settings.wasm = {
+        path: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/",
+        absolute: true,
+    };
+
+    // 2. CRITICAL STEP: Connect fragments to the loader
+    ifcLoader.fragments = fragments;
+
+    // 3. Now that components are configured, initialize them
+    await components.init();
+
+    // 4. Create the 3D world
+    const worlds = components.get(OBC.Worlds);
+    const world = worlds.create();
+    world.scene = new OBC.SimpleScene(components);
     world.renderer = new OBC.SimpleRenderer(components, container);
-    world.scene    = new OBC.SimpleScene(components);
-    world.camera   = new OBC.SimpleCamera(components);
+    world.camera = new OBC.SimpleCamera(components);
     world.scene.setup();
-    world.camera.controls.setLookAt(60, 25, -30, 0, 0, 0);
+    world.camera.controls.setLookAt(10, 10, 10, 0, 0, 0);
 
     const grids = components.get(OBC.Grids);
     grids.create(world);
 
-    await components.init();
-
-    // -------- .FRAG loader (Fragments runtime) --------
-    // Use the official worker (wrap in Blob URL for cross-origin safety on Pages)
-    const workerBlob = await (await fetch("https://thatopen.github.io/engine_fragment/resources/worker.mjs")).blob();
-    const workerUrl = URL.createObjectURL(new File([workerBlob], "worker.mjs", { type: "text/javascript" }));
-    const fragRuntime = new FRAGS.FragmentsModels(workerUrl);
-
-    // Register the fragments runtime with the Components FragmentsManager so
-    // the IfcLoader and other components can find/communicate with it.
-    try {
-      const fragsManager = components.get(OBC.FragmentsManager);
-      if (fragsManager) {
-        // The manager expects a `core` with the fragments runtime API.
-        fragsManager.core = fragRuntime;
-      } else {
-        console.warn('FragmentsManager not found on components; IFC loading may fail.');
-      }
-    } catch (e) {
-      console.warn('Failed to register fragRuntime with Components FragmentsManager', e);
-    }
-
-    // Keep Fragments interactions in sync with the Components camera
-    if (world && world.camera?.controls && typeof world.camera.controls.addEventListener === 'function') {
-      world.camera.controls.addEventListener("rest", () => fragRuntime.update(true));
-    } else {
-      console.warn('camera.controls not available; skipping sync for fragRuntime.update on rest event');
-    }
-
-    // When a FRAG model is loaded, attach it to the Components world
-    if (fragRuntime.models && fragRuntime.models.list && typeof fragRuntime.models.list.onItemSet?.add === 'function') {
-      fragRuntime.models.list.onItemSet.add(({ value: model }) => {
-      model.useCamera(world.camera.three);
-      world.scene.three.add(model.object);
-      fitView();
-      fragRuntime.update(true);
-      updateStats();
-    });
-    } else {
-      console.warn('fragRuntime.models.list.onItemSet.add not available; FRAG model attach events may not be reported');
-    }
-
-    // -------- IFC loader (browser-only conversion) --------
-    const ifcLoader = components.get(OBC.IfcLoader);
-    ifcLoader.settings.wasm = { absolute: true, path: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/" };
-    // Progress UI helpers
-    const progressRoot = document.getElementById('progress');
-    const progressBar = document.getElementById('progressBar');
-    const progressLabel = document.getElementById('progressLabel');
-    function showProgress(label = 'Loading…') { progressRoot.style.display = 'block'; progressBar.style.width = '0%'; progressLabel.textContent = label; }
-    function updateProgress(p, label) { const pct = Math.max(0, Math.min(100, Math.round(p * 100))); progressBar.style.width = pct + '%'; if (label) progressLabel.textContent = label; }
-    function hideProgress() { progressBar.style.width = '100%'; setTimeout(() => { progressRoot.style.display = 'none'; progressBar.style.width = '0%'; progressLabel.textContent = 'Waiting'; }, 300); }
-
-    // Some builds of the IfcLoader may not expose an `onProgress` event object.
-    // If available, wire it to the progress UI; otherwise fall back to simple console logging.
-    if (ifcLoader.onProgress && typeof ifcLoader.onProgress.add === 'function') {
-      ifcLoader.onProgress.add((p) => {
-        // p may be a number 0-1 or an object with loaded/total
-        if (typeof p === 'number') {
-          showProgress('Loading IFC…');
-          updateProgress(p, `Loading IFC… ${Math.round(p * 100)}%`);
-          if (p >= 1) hideProgress();
-        } else if (p && typeof p.loaded === 'number' && typeof p.total === 'number') {
-          showProgress('Loading IFC…');
-          updateProgress(p.loaded / p.total, `Loading IFC… ${Math.round((p.loaded / p.total) * 100)}%`);
-          if (p.loaded >= p.total) hideProgress();
-        } else {
-          console.log('IFC→Fragments progress:', p);
-        }
-      });
-    } else {
-      console.warn('ifcLoader.onProgress is not available; IFC load progress will not be reported.');
-    }
-
-    // -------- UI: That Open UI + OBC bindings --------
+    // --- UI Setup ---
     BUI.Manager.init();
-    // Some versions of the ui-obc bundle may not export `setComponents`.
-    // Guard the call so the page doesn't throw at load if it's absent.
-    if (typeof BUIOBC?.setComponents === 'function') {
-      BUIOBC.setComponents(components);
-    } else {
-      console.warn('BUIOBC.setComponents is not available on the imported ui-obc bundle; skipping OBC binding.');
-    }
-
-    // The library helper `BUI.Component.create(...)` attempted to invoke a
-    // class constructor as a function in some environments which throws
-    // "Class constructor Fi cannot be invoked without 'new'". To avoid that
-    // we build the panel using DOM APIs and the custom elements directly.
     const panel = document.createElement('bim-panel');
     panel.className = 'viewer-panel';
     panel.setAttribute('label', 'Viewer Controls');
     panel.setAttribute('active', '');
-
     panel.innerHTML = `
       <bim-panel-section label="Load">
-        <bim-label style="white-space:normal">
-          Open an <b>IFC</b> (converted locally) or a prebuilt <b>FRAG</b> file.
-        </bim-label>
-        <bim-toolbar>
-          <bim-toolbar-group>
+        <bim-label style="white-space:normal">Open an <b>IFC</b> or a prebuilt <b>FRAG</b> file.</bim-label>
+        <bim-toolbar><bim-toolbar-group>
             <bim-button id="openBtn" icon="mdi:file-upload">Open IFC/FRAG…</bim-button>
-          </bim-toolbar-group>
-        </bim-toolbar>
+        </bim-toolbar-group></bim-toolbar>
       </bim-panel-section>
-
       <bim-panel-section label="Navigation">
         <bim-toolbar>
           <bim-toolbar-group>
@@ -216,14 +154,13 @@
           </bim-toolbar-group>
         </bim-toolbar>
       </bim-panel-section>
-
       <bim-panel-section label="Stats">
         <bim-label id="statsLabel">Meshes: 0 • Tris: 0</bim-label>
       </bim-panel-section>
     `;
     document.body.appendChild(panel);
 
-    // UI refs
+    // --- UI Events ---
     const fileInput  = document.getElementById("file");
     const openBtn    = panel.querySelector("#openBtn");
     const fitBtn     = panel.querySelector("#fitBtn");
@@ -234,127 +171,84 @@
     const statsLabel = panel.querySelector("#statsLabel");
 
     openBtn.addEventListener("click", () => fileInput.click());
-    fitBtn.addEventListener("click", fitView);
-    homeBtn.addEventListener("click", () => { world.camera.controls.reset(true); fitView(); });
-    projSel.addEventListener("change", (e) => setProjection(e.target.value));
-    gridCbx.addEventListener("change", (e) => grids.list.get(world)?.forEach(g => g.visible = e.target.checked));
+    fitBtn.addEventListener("click", () => world.camera.controls.fitToBox(world.scene.three, true));
+    homeBtn.addEventListener("click", () => world.camera.controls.reset(true));
+    projSel.addEventListener("change", (e) => world.camera.setProjection(e.target.value));
+    gridCbx.addEventListener("change", (e) => grids.list.forEach(g => g.visible = e.target.checked));
     wireCbx.addEventListener("change", (e) => setWireframe(e.target.checked));
 
-    // -------- File input & Drag-and-drop (.ifc or .frag) --------
-    fileInput.addEventListener("change", async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      await openFile(file);
-      fileInput.value = "";
-    });
+    // --- File Handling ---
+    fileInput.addEventListener("change", (e) => openFile(e.target.files?.[0]));
 
-    const stage = document.getElementById("stage");
     const dropzone = document.getElementById("dropzone");
-    ["dragenter","dragover"].forEach(ev => stage.addEventListener(ev, (e) => {
-      e.preventDefault(); dropzone.classList.add("active");
-    }));
-    ["dragleave","drop"].forEach(ev => stage.addEventListener(ev, (e) => {
-      e.preventDefault(); dropzone.classList.remove("active");
-    }));
-    stage.addEventListener("drop", async (e) => {
-      const file = e.dataTransfer?.files?.[0];
-      if (file) await openFile(file);
-    });
+    ["dragenter","dragover"].forEach(ev => container.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("active"); }));
+    ["dragleave","drop"].forEach(ev => container.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("active"); }));
+    container.addEventListener("drop", (e) => openFile(e.dataTransfer?.files?.[0]));
 
     async function openFile(file) {
-      if (/\.frag$/i.test(file.name)) {
-        await loadFRAG(file);
-      } else if (/\.ifc$/i.test(file.name)) {
-        await loadIFC(file);
-      } else {
-        alert("Please select an .ifc or .frag file.");
-      }
+      if (!file) return;
+      if (/\.ifc$/i.test(file.name)) await loadIFC(file);
+      else if (/\.frag$/i.test(file.name)) await loadFRAG(file);
+      else alert("Please select an .ifc or .frag file.");
+      fileInput.value = ""; // Reset for re-selection
     }
 
+    // --- Loading Functions ---
+    const progressRoot = document.getElementById('progress');
+    const progressLabel = document.getElementById('progressLabel');
+    const progressBar = document.getElementById('progressBar');
+
     async function loadIFC(file) {
-      // Show indeterminate progress while converting/loading
-      try {
-        showProgress('Converting IFC…');
-      } catch (e) {}
-      // Components IfcLoader: converts IFC→Fragments and returns a model
+      progressRoot.style.display = "block";
+      progressLabel.textContent = "Loading IFC...";
+      progressBar.style.width = "0%";
       try {
         const model = await ifcLoader.load(file);
-        model.useWorld(world);
-        world.scene.three.add(model.object);
-        fitView();
+        world.scene.three.add(model);
         updateStats();
+        world.camera.controls.fitToBox(model, true);
+      } catch (error) {
+        alert(`Error loading IFC: ${error.message}`);
       } finally {
-        try { hideProgress(); } catch (e) {}
+        progressRoot.style.display = "none";
       }
     }
 
     async function loadFRAG(file) {
-      try { showProgress('Loading FRAG…'); } catch (e) {}
+      progressRoot.style.display = "block";
+      progressLabel.textContent = "Loading FRAG...";
+      progressBar.style.width = "0%";
       try {
-        const buffer = await file.arrayBuffer();
-        const name = file.name.replace(/\.[^/.]+$/, "");
-        const model = await fragRuntime.load(buffer, { modelId: name });
-        model.useCamera(world.camera.three);
+        const data = await file.arrayBuffer();
+        // Use filename (without extension) as a stable modelId required by fragments
+        const modelId = (file.name || "model").replace(/\.[^/.]+$/, "");
+        const model = await fragments.load(data, { modelId });
         world.scene.three.add(model.object);
-        fitView();
-        fragRuntime.update(true);
         updateStats();
+        world.camera.controls.fitToBox(model.object, true);
+      } catch (error) {
+        alert(`Error loading FRAG: ${error.message}`);
       } finally {
-        try { hideProgress(); } catch (e) {}
+        progressRoot.style.display = "none";
       }
     }
 
-    // -------- Viewer utilities --------
-    function sceneBounds() {
-      const box = new THREE.Box3();
-      box.expandByObject(world.scene.three);
-      return box;
-    }
-
-    function fitView() {
-      const box = sceneBounds();
-      if (box.isEmpty()) return;
-      const size   = box.getSize(new THREE.Vector3()).length();
-      const center = box.getCenter(new THREE.Vector3());
-      const fitDist = Math.max(size * 1.1, 10);
-      const dir = new THREE.Vector3(1, 0.6, -1).normalize();
-      const cam = world.camera.three;
-
-      cam.position.copy(center.clone().add(dir.multiplyScalar(fitDist)));
-      world.camera.controls.setLookAt(cam.position.x, cam.position.y, cam.position.z, center.x, center.y, center.z, true);
-      cam.near = Math.max(0.1, size / 1000);
-      cam.far  = Math.max(2000, size * 5);
-      cam.updateProjectionMatrix();
-    }
-
-    function setProjection(mode) {
-      if (mode === "persp") world.camera.setProjection("perspective");
-      if (mode === "ortho") world.camera.setProjection("orthographic");
-    }
-
-    function setWireframe(on) {
-      world.scene.three.traverse(obj => {
-        if (obj.isMesh && obj.material) {
-          if (Array.isArray(obj.material)) obj.material.forEach(m => m.wireframe = on);
-          else obj.material.wireframe = on;
-        }
+    // --- Utilities ---
+    function setWireframe(enabled) {
+      world.scene.three.traverse(child => {
+        if (child.isMesh) child.material.wireframe = enabled;
       });
     }
 
     function updateStats() {
       let meshes = 0, tris = 0;
       world.scene.three.traverse(o => {
-        if (o.isMesh && o.geometry) {
+        if (o.isMesh) {
           meshes++;
-          const triCount = o.geometry.index
-            ? o.geometry.index.count / 3
-            : (o.geometry.attributes.position?.count || 0) / 3;
-          tris += triCount;
+          tris += o.geometry.index ? o.geometry.index.count / 3 : o.geometry.attributes.position.count / 3;
         }
       });
-  // `bim-label` is a custom element; use `textContent` so the visible label updates
-  // even if the element doesn't implement a `value` property.
-  statsLabel.textContent = `Meshes: ${meshes.toLocaleString()} • Tris: ${tris.toLocaleString()}`;
+      statsLabel.textContent = `Meshes: ${meshes} • Tris: ${Math.round(tris).toLocaleString()}`;
     }
   </script>
 </body>
