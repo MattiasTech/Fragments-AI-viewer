@@ -6,18 +6,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- Import map: ONE CDN + pinned versions -->
- <script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.175.0/examples/jsm/",
-    "@thatopen/fragments": "https://cdn.jsdelivr.net/npm/@thatopen/fragments@3.1.7/dist/index.mjs",
-    "@thatopen/ui": "https://cdn.jsdelivr.net/npm/@thatopen/ui@3.1.1/dist/index.js",
-    "web-ifc": "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/web-ifc-api.js"
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.175.0/examples/jsm/",
+      "@thatopen/fragments": "https://cdn.jsdelivr.net/npm/@thatopen/fragments@3.1.7/dist/index.mjs",
+      "@thatopen/ui": "https://cdn.jsdelivr.net/npm/@thatopen/ui@3.1.1/dist/index.js",
+      "web-ifc": "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/web-ifc-api.js"
+    }
   }
-}
-</script>
-
+  </script>
 
   <style>
     :root { --bg:#0c0f14; --fg:#e6eefc; --panel:#0b1120; --border:#1f2a44; }
@@ -33,7 +32,7 @@
                 display:grid; place-items:center; pointer-events:none; opacity:0; transition:.2s; }
     #dropzone.active { opacity:1; background:rgba(0,0,0,.25); }
     input[type=file] { display:none }
-    /* Place the That Open UI panel */
+    /* That Open UI panel */
     bim-panel.viewer-panel { position:fixed; left:12px; top:56px; max-width:360px; z-index:11 }
     .phone-menu-toggler { position:fixed; right:12px; top:56px; z-index:12 }
   </style>
@@ -74,7 +73,7 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0c0f14);
 
-    const camera = new THREE.PerspectiveCamera(60, 2, 0.1, 10000);
+    let camera = new THREE.PerspectiveCamera(60, 2, 0.1, 10000); // let (we swap to Ortho if user selects)
     camera.position.set(60, 25, -30);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -97,7 +96,7 @@
     function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
     animate();
 
-    // ---------- Fragments core + worker (blob pattern from docs) ----------
+    // ---------- Fragments core + worker (blob pattern) ----------
     const workerBlob = await (await fetch("https://thatopen.github.io/engine_fragment/resources/worker.mjs")).blob();
     const workerUrl = URL.createObjectURL(new File([workerBlob], "worker.mjs", { type: "text/javascript" }));
     const fragments = new FRAGS.FragmentsModels(workerUrl);
@@ -114,8 +113,7 @@
 
     // ---------- IFC → Fragments importer ----------
     const importer = new FRAGS.IfcImporter();
-    importer.wasm = { absolute: true, path: "https://unpkg.com/web-ifc@0.0.69/" }; // per tutorial
-    // (Keep the exact path to avoid WASM/JS binding errors.)
+    importer.wasm = { absolute: true, path: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/" }; // trailing slash is important
 
     // ---------- I/O ----------
     const fileInput = document.getElementById("file");
@@ -184,8 +182,8 @@
     // ---------- Utility: fit, stats, toggles ----------
     function sceneBounds() {
       const box = new THREE.Box3();
-      // include all Fragments models
-      for (const [, model] of fragments.models.list) box.expandByObject(model.object);
+      // Correct iteration: list.forEach gives you the MODEL, not [key, model]
+      fragments.models.list.forEach((model) => box.expandByObject(model.object));
       return box;
     }
 
@@ -219,7 +217,7 @@
     }
 
     function setWireframe(on) {
-      fragments.models.list.forEach(([, m]) => {
+      fragments.models.list.forEach((m) => {
         m.object.traverse(obj => {
           if (obj.isMesh && obj.material) {
             if (Array.isArray(obj.material)) obj.material.forEach(mat => mat.wireframe = on);
@@ -246,12 +244,14 @@
 
     function updateStats() {
       let meshes = 0, tris = 0;
-      fragments.models.list.forEach(([, m]) => {
+      fragments.models.list.forEach((m) => {
         m.object.traverse(o => {
           if (o.isMesh && o.geometry) {
             meshes++;
-            const geom = o.geometry.index ? o.geometry.index.count/3 : o.geometry.attributes.position.count/3;
-            tris += geom;
+            const triCount = o.geometry.index
+              ? o.geometry.index.count / 3
+              : o.geometry.attributes.position.count / 3;
+            tris += triCount;
           }
         });
       });
