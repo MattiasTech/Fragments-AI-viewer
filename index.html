@@ -157,7 +157,13 @@
 
     // -------- UI: That Open UI + OBC bindings --------
     BUI.Manager.init();
-    BUIOBC.setComponents(components);
+    // Some versions of the ui-obc bundle may not export `setComponents`.
+    // Guard the call so the page doesn't throw at load if it's absent.
+    if (typeof BUIOBC?.setComponents === 'function') {
+      BUIOBC.setComponents(components);
+    } else {
+      console.warn('BUIOBC.setComponents is not available on the imported ui-obc bundle; skipping OBC binding.');
+    }
 
     const [panel] = BUI.Component.create(BUI.Panel, () => BUI.html`
       <bim-panel class="viewer-panel" label="Viewer Controls" active>
