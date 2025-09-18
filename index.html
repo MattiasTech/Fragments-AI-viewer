@@ -57,6 +57,14 @@
 
   <div id="stage">
     <div id="container"></div>
+    <div id="progress" style="position:fixed;left:50%;transform:translateX(-50%);bottom:18px;width:60%;max-width:720px;z-index:20;display:none">
+      <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.06);padding:6px;border-radius:6px;">
+        <div id="progressBarWrap" style="background:rgba(0,0,0,.25);height:12px;border-radius:4px;overflow:hidden">
+          <div id="progressBar" style="width:0%;height:100%;background:linear-gradient(90deg,#3aa1ff,#66ffb3);transition:width .15s ease"></div>
+        </div>
+        <div id="progressLabel" style="margin-top:6px;color:var(--fg);font-size:12px;text-align:center">Waiting</div>
+      </div>
+    </div>
     <div id="dropzone"><div style="color:#fff;font:600 16px system-ui">Drop IFC or FRAG here</div></div>
   </div>
 
@@ -96,21 +104,56 @@
     const fragRuntime = new FRAGS.FragmentsModels(workerUrl);
 
     // Keep Fragments interactions in sync with the Components camera
-    world.camera.controls.addEventListener("rest", () => fragRuntime.update(true));
+    if (world && world.camera?.controls && typeof world.camera.controls.addEventListener === 'function') {
+      world.camera.controls.addEventListener("rest", () => fragRuntime.update(true));
+    } else {
+      console.warn('camera.controls not available; skipping sync for fragRuntime.update on rest event');
+    }
 
     // When a FRAG model is loaded, attach it to the Components world
-    fragRuntime.models.list.onItemSet.add(({ value: model }) => {
+    if (fragRuntime.models && fragRuntime.models.list && typeof fragRuntime.models.list.onItemSet?.add === 'function') {
+      fragRuntime.models.list.onItemSet.add(({ value: model }) => {
       model.useCamera(world.camera.three);
       world.scene.three.add(model.object);
       fitView();
       fragRuntime.update(true);
       updateStats();
     });
+    } else {
+      console.warn('fragRuntime.models.list.onItemSet.add not available; FRAG model attach events may not be reported');
+    }
 
     // -------- IFC loader (browser-only conversion) --------
     const ifcLoader = components.get(OBC.IfcLoader);
     ifcLoader.settings.wasm = { absolute: true, path: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.69/" };
-    ifcLoader.onProgress.add((p) => console.log("IFC→Fragments progress:", p));
+    // Progress UI helpers
+    const progressRoot = document.getElementById('progress');
+    const progressBar = document.getElementById('progressBar');
+    const progressLabel = document.getElementById('progressLabel');
+    function showProgress(label = 'Loading…') { progressRoot.style.display = 'block'; progressBar.style.width = '0%'; progressLabel.textContent = label; }
+    function updateProgress(p, label) { const pct = Math.max(0, Math.min(100, Math.round(p * 100))); progressBar.style.width = pct + '%'; if (label) progressLabel.textContent = label; }
+    function hideProgress() { progressBar.style.width = '100%'; setTimeout(() => { progressRoot.style.display = 'none'; progressBar.style.width = '0%'; progressLabel.textContent = 'Waiting'; }, 300); }
+
+    // Some builds of the IfcLoader may not expose an `onProgress` event object.
+    // If available, wire it to the progress UI; otherwise fall back to simple console logging.
+    if (ifcLoader.onProgress && typeof ifcLoader.onProgress.add === 'function') {
+      ifcLoader.onProgress.add((p) => {
+        // p may be a number 0-1 or an object with loaded/total
+        if (typeof p === 'number') {
+          showProgress('Loading IFC…');
+          updateProgress(p, `Loading IFC… ${Math.round(p * 100)}%`);
+          if (p >= 1) hideProgress();
+        } else if (p && typeof p.loaded === 'number' && typeof p.total === 'number') {
+          showProgress('Loading IFC…');
+          updateProgress(p.loaded / p.total, `Loading IFC… ${Math.round((p.loaded / p.total) * 100)}%`);
+          if (p.loaded >= p.total) hideProgress();
+        } else {
+          console.log('IFC→Fragments progress:', p);
+        }
+      });
+    } else {
+      console.warn('ifcLoader.onProgress is not available; IFC load progress will not be reported.');
+    }
 
     // -------- UI: That Open UI + OBC bindings --------
     BUI.Manager.init();
@@ -202,23 +245,36 @@
     }
 
     async function loadIFC(file) {
+      // Show indeterminate progress while converting/loading
+      try {
+        showProgress('Converting IFC…');
+      } catch (e) {}
       // Components IfcLoader: converts IFC→Fragments and returns a model
-      const model = await ifcLoader.load(file);
-      model.useWorld(world);
-      world.scene.three.add(model.object);
-      fitView();
-      updateStats();
+      try {
+        const model = await ifcLoader.load(file);
+        model.useWorld(world);
+        world.scene.three.add(model.object);
+        fitView();
+        updateStats();
+      } finally {
+        try { hideProgress(); } catch (e) {}
+      }
     }
 
     async function loadFRAG(file) {
-      const buffer = await file.arrayBuffer();
-      const name = file.name.replace(/\.[^/.]+$/, "");
-      const model = await fragRuntime.load(buffer, { modelId: name });
-      model.useCamera(world.camera.three);
-      world.scene.three.add(model.object);
-      fitView();
-      fragRuntime.update(true);
-      updateStats();
+      try { showProgress('Loading FRAG…'); } catch (e) {}
+      try {
+        const buffer = await file.arrayBuffer();
+        const name = file.name.replace(/\.[^/.]+$/, "");
+        const model = await fragRuntime.load(buffer, { modelId: name });
+        model.useCamera(world.camera.three);
+        world.scene.three.add(model.object);
+        fitView();
+        fragRuntime.update(true);
+        updateStats();
+      } finally {
+        try { hideProgress(); } catch (e) {}
+      }
     }
 
     // -------- Viewer utilities --------
@@ -269,7 +325,9 @@
           tris += triCount;
         }
       });
-      statsLabel.value = `Meshes: ${meshes.toLocaleString()} • Tris: ${tris.toLocaleString()}`;
+  // `bim-label` is a custom element; use `textContent` so the visible label updates
+  // even if the element doesn't implement a `value` property.
+  statsLabel.textContent = `Meshes: ${meshes.toLocaleString()} • Tris: ${tris.toLocaleString()}`;
     }
   </script>
 </body>
