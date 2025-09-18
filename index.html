@@ -222,4 +222,107 @@
     }));
     stage.addEventListener("drop", async (e) => {
       const file = e.dataTransfer.files?.[0]; if (!file) return;
-      if (/\.frag$/i.test(file
+      if (/\.frag$/i.test(file.name)) {
+        await loadFRAGBuffer(await file.arrayBuffer(), file.name.replace(/\.[^/.]+$/, ""));
+      } else if (/\.ifc$/i.test(file.name)) {
+        await convertIFCToFRAG(file);
+      } else {
+        alert("Drop an .ifc or .frag file.");
+      }
+    });
+
+    // Download last converted .frag
+    downloadBtn.addEventListener("click", () => {
+      if (!lastFragBuffer) return;
+      const file = new File([lastFragBuffer], "model.frag");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(file);
+      a.download = file.name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    // ---------- Utility: fit, stats, toggles ----------
+    function sceneBounds() {
+      const box = new THREE.Box3();
+      fragments.models.list.forEach((model) => box.expandByObject(model.object));
+      return box;
+    }
+
+    function fitToScene() {
+      const box = sceneBounds();
+      if (box.isEmpty()) return;
+      const size = box.getSize(new THREE.Vector3()).length();
+      const center = box.getCenter(new THREE.Vector3());
+      const fitDist = Math.max(size * 1.1, 10);
+      const dir = new THREE.Vector3(1, 0.6, -1).normalize();
+      camera.position.copy(center.clone().add(dir.multiplyScalar(fitDist)));
+      controls.target.copy(center);
+      camera.near = Math.max(0.1, size / 1000);
+      camera.far = Math.max(2000, size * 5);
+      camera.updateProjectionMatrix();
+    }
+
+    function setProjection(mode) {
+      if (mode === "persp" && !(camera instanceof THREE.PerspectiveCamera)) {
+        const persp = new THREE.PerspectiveCamera(60, camera.aspect, camera.near, camera.far);
+        persp.position.copy(camera.position); persp.lookAt(controls.target);
+        camera = persp; controls.object = camera; fitToScene();
+      }
+      if (mode === "ortho" && !(camera instanceof THREE.OrthographicCamera)) {
+        const box = sceneBounds(); const size = box.getSize(new THREE.Vector3());
+        const d = Math.max(size.x, size.y, size.z) || 10;
+        const ortho = new THREE.OrthographicCamera(-d, d, d, -d, 0.01, 100000);
+        ortho.position.copy(camera.position); ortho.lookAt(controls.target);
+        camera = ortho; controls.object = camera; fitToScene();
+      }
+    }
+
+    function setWireframe(on) {
+      fragments.models.list.forEach((m) => {
+        m.object.traverse(obj => {
+          if (obj.isMesh && obj.material) {
+            if (Array.isArray(obj.material)) obj.material.forEach(mat => mat.wireframe = on);
+            else obj.material.wireframe = on;
+          }
+        });
+      });
+    }
+
+    function setBackground(kind) {
+      if (kind === "dark") scene.background = new THREE.Color(0x0c0f14);
+      if (kind === "light") scene.background = new THREE.Color(0xf3f5f8);
+      if (kind === "checker") {
+        const size = 512, data = new Uint8Array(3 * size * size);
+        for (let y=0;y<size;y++) for (let x=0;x<size;x++) {
+          const i = (y*size + x)*3; const c = ((x>>5)&1) ^ ((y>>5)&1) ? 230 : 200;
+          data[i]=data[i+1]=data[i+2]=c;
+        }
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBFormat);
+        tex.needsUpdate = true; tex.repeat.set(10,10); tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        scene.background = tex;
+      }
+    }
+
+    function updateStats() {
+      if (!statsLabel) return; // guard during very-early calls
+      let meshes = 0, tris = 0;
+      fragments.models.list.forEach((m) => {
+        m.object.traverse(o => {
+          if (o.isMesh && o.geometry) {
+            meshes++;
+            const triCount = o.geometry.index
+              ? o.geometry.index.count / 3
+              : o.geometry.attributes.position.count / 3;
+            tris += triCount;
+          }
+        });
+      });
+      statsLabel.value = `Meshes: ${meshes.toLocaleString()} • Tris: ${tris.toLocaleString()}`;
+    }
+
+    // Initial background
+    setBackground("dark");
+  </script>
+</body>
+</html>
