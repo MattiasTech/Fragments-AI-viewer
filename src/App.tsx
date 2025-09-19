@@ -84,8 +84,9 @@ world.scene.three.add(ambient);
 
       // IFC importer -> load WASM from your app (avoid CDN mismatch)
       const ifcImporter = new FRAGS.IfcImporter();
+      const baseUrl = (import.meta as any).env?.BASE_URL ?? '/';
       ifcImporter.wasm = {
-        path: '/web-ifc/', // requires /public/web-ifc/web-ifc-api.js and /public/web-ifc/web-ifc.wasm
+        path: `${baseUrl}web-ifc/`, // resolves under Pages base
         absolute: true
       };
       ifcImporterRef.current = ifcImporter;
