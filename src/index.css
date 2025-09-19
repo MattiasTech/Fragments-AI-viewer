@@ -1,0 +1,13 @@
+/* Base styles for the BIM viewer application */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden; /* prevent page scrollbar */
+}
+
+* {
+  box-sizing: border-box;
+}
