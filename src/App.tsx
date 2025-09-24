@@ -5,6 +5,8 @@ import AppBar from '@mui/material/AppBar';
 import Toolbar from '@mui/material/Toolbar';
 import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
+import Paper from '@mui/material/Paper';
+import LinearProgress from '@mui/material/LinearProgress';
 import * as THREE from 'three';
 import Stats from 'stats.js';
 
@@ -24,10 +26,18 @@ const App: React.FC = () => {
   const [models, setModels] = useState<{ id: string; label: string }[]>([]);
   const [explorerTree, setExplorerTree] = useState<any | null>(null);
   const [explorerModelId, setExplorerModelId] = useState<string | null>(null);
+  const [nameCache, setNameCache] = useState<Map<number, string>>(new Map());
   const [selected, setSelected] = useState<Selected>(null);
   const [properties, setProperties] = useState<Record<string, any> | null>(null);
+  const [ifcProgress, setIfcProgress] = useState<number | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const ifcAbortRef = useRef<AbortController | null>(null);
+  const ifcCancelledRef = useRef<boolean>(false);
   const navCubeRef = useRef<HTMLCanvasElement | null>(null);
   const navCubeState = useRef<{ scene: THREE.Scene; camera: THREE.PerspectiveCamera; renderer: THREE.WebGLRenderer; cube: THREE.Mesh } | null>(null);
+  const selectionMarkerRef = useRef<THREE.Group | null>(null);
+  const prevInstanceHighlightRef = useRef<{ mesh: THREE.InstancedMesh; index: number } | null>(null);
+  const highlighterRef = useRef<any>(null);
 
   useEffect(() => {
     const container = viewerRef.current;
@@ -54,6 +64,19 @@ const ambient = new THREE.AmbientLight(0xffffff, 1.0);
 world.scene.three.add(ambient);
 
   components.init();
+    // Try to set up That Open Highlighter if available in this version
+    try {
+      const HighlighterClass = (OBC as any).Highlighter ?? (FRAGS as any).FragmentHighlighter ?? null;
+      if (HighlighterClass) {
+        const hl = new HighlighterClass(components);
+        // Some implementations may require setup with world; protect with try/catch
+        try { hl.world = world; } catch {}
+        try { hl.setup?.(world); } catch {}
+        // Optional: outline enabled if supported
+        try { if (hl.outlines) hl.outlines.enabled = true; } catch {}
+        highlighterRef.current = hl;
+      }
+    } catch { /* ignore, fallback to manual coloring */ }
     components.get(OBC.Grids).create(world);
     worldRef.current = world;
 
@@ -155,6 +178,7 @@ world.scene.three.add(ambient);
           const ids = [...fragmentsRef.current.models.list.values()].map(m => m.modelId);
           await Promise.all(ids.map(id => fragmentsRef.current!.disposeModel(id)));
         }
+        try { highlighterRef.current?.clear?.(); } catch {}
         if (workerUrlRef.current) URL.revokeObjectURL(workerUrlRef.current);
         // Remove any renderer canvases appended to the container
         try { container.replaceChildren(); } catch { /* no-op */ }
@@ -180,18 +204,38 @@ world.scene.three.add(ambient);
     }
 
     // Keep previously loaded models to allow multi-model exploration
-
+    let usedIfcProgress = false;
     try {
   const modelId = `${file.name}-${Date.now()}`;
   let model: any;
 
       if (ext === 'ifc') {
         if (!ifcImporter) throw new Error('IFC importer is not ready.');
+        setIfcProgress(0);
+        usedIfcProgress = true;
+        ifcCancelledRef.current = false;
+        setIsCancelling(false);
+        const ctrl = new AbortController();
+        ifcAbortRef.current = ctrl;
         const ifcBytes = new Uint8Array(await file.arrayBuffer());
         const processed = await ifcImporter.process({
           bytes: ifcBytes,
-          progressCallback: (p, msg) => console.log(`IFC conversion progress: ${p.toFixed(1)}%`, msg),
-        });
+          progressCallback: (p: number, msg: unknown) => {
+            if (ifcCancelledRef.current) return;
+            // Normalize progress: importer may report 0-1 or 0-100
+            const raw = typeof p === 'number' ? p : 0;
+            const percent = raw <= 1 ? raw * 100 : raw;
+            const clamped = Math.max(0, Math.min(100, percent));
+            setIfcProgress(Number(clamped.toFixed(1)));
+            console.log(`IFC conversion progress: ${clamped.toFixed(1)}%`, msg);
+          },
+          // Pass abort signal if importer supports it; harmless if ignored
+          signal: ctrl.signal,
+        } as any);
+        // If the user cancelled during processing, stop here
+        if (ifcCancelledRef.current) {
+          throw { __cancelled: true } as any;
+        }
         // Normalize to a clean ArrayBuffer (no SharedArrayBuffer unions)
         let fragArrayBuffer: ArrayBuffer;
         if (processed instanceof ArrayBuffer) {
@@ -262,18 +306,40 @@ world.scene.three.add(ambient);
         const tree = await model.getSpatialStructure();
         setExplorerTree(tree);
         setExplorerModelId(modelId);
+        setNameCache(new Map());
+        // Debug: sample the spatial structure to understand node shapes
+        try { console.debug('[Explorer] spatial structure sample:', sampleExplorerTree(tree)); } catch {}
       } catch (e) {
         console.warn('Failed to read spatial structure', e);
       }
-    } catch (err) {
-      console.error(err);
-      alert('Failed to load model. See console for more details.');
+      // Ensure we end with 100% before closing
+      if (usedIfcProgress) setIfcProgress(100);
+    } catch (err: any) {
+      if (err && (err.__cancelled || err?.name === 'AbortError')) {
+        console.info('IFC conversion cancelled by user.');
+      } else {
+        console.error(err);
+        alert('Failed to load model. See console for more details.');
+      }
       setModelLoaded(false);
     } finally {
       // safe even after awaits
       if (inputEl) inputEl.value = '';
+      // Hide IFC progress overlay if shown
+      if (usedIfcProgress) setTimeout(() => setIfcProgress(null), 200);
+      ifcAbortRef.current = null;
+      setIsCancelling(false);
     }
   };
+
+  const cancelIfcConversion = useCallback(() => {
+    if (ifcProgress === null) return;
+    ifcCancelledRef.current = true;
+    setIsCancelling(true);
+    try { ifcAbortRef.current?.abort(); } catch {}
+    // Immediately hide overlay; if the importer ignores abort, we still avoid using the result
+    setIfcProgress(null);
+  }, [ifcProgress]);
 
   const fitToCurrentModel = useCallback(async () => {
     const world = worldRef.current;
@@ -310,32 +376,165 @@ world.scene.three.add(ambient);
     }
   }, []);
 
-  // Simple picking to show properties
+  // Simple picking to show properties + add a 3D selection marker
   useEffect(() => {
     const container = viewerRef.current; const world = worldRef.current;
     if (!container || !world) return;
+    const dom = world.renderer?.three.domElement as HTMLCanvasElement | undefined;
+    if (!dom) return;
     const mouse = new THREE.Vector2();
-    const onClick = async (ev: MouseEvent) => {
+    const pickAt = async (clientX: number, clientY: number) => {
       const fr = fragmentsRef.current; if (!fr) return;
-      const rect = container.getBoundingClientRect();
-      mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-      let best: { dist: number; model: any; localId: number } | null = null;
+      const rect = dom.getBoundingClientRect();
+      mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      let best: { dist: number; model: any; localId: number; point?: THREE.Vector3; object?: any; instanceId?: number } | null = null;
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, world.camera.three);
       for (const model of fr.models.list.values()) {
         const hit = await model.raycast({ camera: world.camera.three, mouse, dom: world.renderer!.three.domElement! });
         if (hit && typeof hit.distance === 'number') {
-          if (!best || hit.distance < best.dist) best = { dist: hit.distance, model, localId: hit.localId } as any;
+          const pt = (hit as any).point instanceof THREE.Vector3
+            ? (hit as any).point.clone()
+            : raycaster.ray.at(hit.distance, new THREE.Vector3());
+          if (!best || hit.distance < best.dist) best = {
+            dist: hit.distance,
+            model,
+            localId: (hit as any).localId,
+            point: pt,
+            object: (hit as any).object,
+            instanceId: (hit as any).instanceId,
+          } as any;
         }
       }
       if (!best) return;
+      // Prefer native Highlighter if present; otherwise color the picked instance
+      let usedNativeHighlight = false;
+      try {
+        const hl = highlighterRef.current;
+        if (hl) {
+          try { hl.clear?.(); } catch {}
+          // Try common method names across versions
+          const colorHex = 0x66ccff;
+          if (typeof hl.highlightById === 'function') {
+            await hl.highlightById(best.model, [best.localId], colorHex);
+            usedNativeHighlight = true;
+          } else if (typeof hl.highlightByID === 'function') {
+            await hl.highlightByID(best.model, [best.localId], colorHex);
+            usedNativeHighlight = true;
+          } else if (typeof hl.add === 'function') {
+            hl.add(best.model, [best.localId], colorHex);
+            usedNativeHighlight = true;
+          } else if (typeof hl.select === 'function' && best.object) {
+            hl.select(best.object, best.instanceId);
+            usedNativeHighlight = true;
+          }
+        }
+      } catch { /* ignore and fallback */ }
+
+      if (!usedNativeHighlight) {
+        // Try to color the selected instance (light blue) if the hit is an InstancedMesh
+        try {
+          const obj: any = best.object;
+          const idx: any = best.instanceId;
+          if (obj && obj.isInstancedMesh && Number.isInteger(idx)) {
+            // reset previous highlight
+            const prev = prevInstanceHighlightRef.current;
+            if (prev && prev.mesh && prev.mesh.instanceColor) {
+              const white = new THREE.Color(1, 1, 1);
+              try { prev.mesh.setColorAt(prev.index, white); prev.mesh.instanceColor.needsUpdate = true; } catch {}
+            }
+            const inst = obj as THREE.InstancedMesh;
+            const color = new THREE.Color(0x66ccff);
+            try { inst.setColorAt(idx as number, color); inst.instanceColor!.needsUpdate = true; } catch {}
+            prevInstanceHighlightRef.current = { mesh: inst, index: idx as number };
+          }
+        } catch { /* non-fatal */ }
+      }
+      // Place/update selection marker
+      try {
+        const pt = best.point ?? new THREE.Vector3();
+        let marker = selectionMarkerRef.current;
+        if (!marker) {
+          marker = new THREE.Group();
+          // Determine a reasonable marker scale from current models
+          const full = new THREE.Box3();
+          const fr2 = fragmentsRef.current;
+          if (fr2 && fr2.models.list.size) {
+            for (const m of fr2.models.list.values()) full.expandByObject(m.object);
+          }
+          const sph = new THREE.Sphere(); full.getBoundingSphere(sph);
+          const base = isFinite(sph.radius) && sph.radius > 0 ? sph.radius * 0.01 : 0.3;
+          const size = Math.max(0.05, Math.min(2, base));
+
+          const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(size * 0.5, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xffcc00, depthTest: false })
+          );
+          const ring = new THREE.Mesh(
+            new THREE.RingGeometry(size * 0.8, size, 32),
+            new THREE.MeshBasicMaterial({ color: 0xffee88, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.9 })
+          );
+          ring.rotation.x = Math.PI / 2; // default orientation
+          sphere.renderOrder = 999;
+          ring.renderOrder = 999;
+          marker.add(sphere);
+          marker.add(ring);
+          world.scene.three.add(marker);
+          selectionMarkerRef.current = marker;
+        }
+        marker.position.copy(pt);
+        // Make ring face the camera
+        const ringMesh = marker.children[1] as THREE.Mesh;
+        ringMesh.lookAt(world.camera.three.position);
+        marker.visible = true;
+      } catch { /* non-fatal */ }
+
       setSelected({ modelId: best.model.modelId, localId: best.localId });
       try {
         const [data] = await best.model.getItemsData([best.localId], { attributesDefault: true });
         setProperties(data || null);
       } catch {}
     };
-    container.addEventListener('click', onClick);
-    return () => container.removeEventListener('click', onClick);
+    const onPointerDown = async (ev: PointerEvent) => {
+      if (ev.button !== 0) return; // left button only
+      await pickAt(ev.clientX, ev.clientY);
+    };
+    const onClick = async (ev: MouseEvent) => {
+      await pickAt(ev.clientX, ev.clientY);
+    };
+    // Use capture on pointerdown to avoid controls stopping propagation
+    dom.addEventListener('pointerdown', onPointerDown, { capture: true } as AddEventListenerOptions);
+    dom.addEventListener('click', onClick);
+    return () => {
+      dom.removeEventListener('pointerdown', onPointerDown, { capture: true } as AddEventListenerOptions);
+      dom.removeEventListener('click', onClick);
+      // Cleanup marker
+      try {
+        const marker = selectionMarkerRef.current;
+        if (marker) {
+          world.scene.three.remove(marker);
+          marker.traverse(obj => {
+            if ((obj as any).geometry) (obj as any).geometry.dispose?.();
+            if ((obj as any).material) {
+              const mats = Array.isArray((obj as any).material) ? (obj as any).material : [(obj as any).material];
+              for (const m of mats) m?.dispose?.();
+            }
+          });
+          selectionMarkerRef.current = null;
+        }
+      } catch { /* no-op */ }
+      // Reset any instance highlight
+      try {
+        const prev = prevInstanceHighlightRef.current;
+        if (prev && prev.mesh && prev.mesh.instanceColor) {
+          const white = new THREE.Color(1, 1, 1);
+          prev.mesh.setColorAt(prev.index, white);
+          prev.mesh.instanceColor.needsUpdate = true;
+        }
+        prevInstanceHighlightRef.current = null;
+      } catch { /* no-op */ }
+    };
   }, []);
 
   const resetView = useCallback(() => {
@@ -379,7 +578,33 @@ world.scene.three.add(ambient);
       <div
         ref={viewerRef}
         style={{ width: '100%', height: 'calc(100% - 64px)', background: '#151515', position: 'relative' }}
-      />
+      >
+        {ifcProgress !== null && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 2000,
+              pointerEvents: 'none'
+            }}
+          >
+            <Paper elevation={6} sx={{ p: 3, minWidth: 340, textAlign: 'center', pointerEvents: 'auto' }}>
+              <Typography variant="subtitle1" sx={{ mb: 1 }}>Converting IFC…</Typography>
+              <LinearProgress variant="determinate" value={Math.max(0, Math.min(100, ifcProgress))} sx={{ height: 10, borderRadius: 1 }} />
+              <Typography variant="caption" sx={{ mt: 1, display: 'block' }}>
+                {ifcProgress.toFixed(1)}%
+              </Typography>
+              <div style={{ marginTop: 12 }}>
+                <Button size="small" variant="outlined" color="inherit" onClick={cancelIfcConversion} disabled={isCancelling}>
+                  {isCancelling ? 'Cancelling…' : 'Cancel'}
+                </Button>
+              </div>
+            </Paper>
+          </div>
+        )}
+      </div>
 
       {/* Right docked panel */}
       <div className="right-panel">
@@ -413,6 +638,25 @@ world.scene.three.add(ambient);
               <div className="tree-root" style={{ maxHeight: 260, overflow: 'auto' }}>
                 <ExplorerTree
                   tree={explorerTree}
+                  modelId={explorerModelId}
+                  labelFor={(id, fallback) => nameCache.get(id) ?? fallback}
+                  requestLabel={async (id) => {
+                    if (!explorerModelId) return;
+                    if (nameCache.has(id)) return;
+                    const fr = fragmentsRef.current; if (!fr) return;
+                    const model = fr.models.list.get(explorerModelId); if (!model) return;
+                    try {
+                      const [data] = await model.getItemsData([id], { attributesDefault: true });
+                      const nameFromProps = extractName(data);
+                      const typeText = toText((data as any)?.type);
+                      const name: string = nameFromProps ?? typeText ?? `#${id}`;
+                      setNameCache(prev => {
+                        const next = new Map(prev);
+                        next.set(id, name);
+                        return next;
+                      });
+                    } catch {}
+                  }}
                   onPick={async (localId) => {
                     const fr = fragmentsRef.current; if (!fr || !explorerModelId) return;
                     const model = fr.models.list.get(explorerModelId); if (!model) return;
@@ -434,9 +678,11 @@ world.scene.three.add(ambient);
               <div className="props-table">
                 <div className="prop-row"><span className="k">Model</span><span className="v">{selected.modelId}</span></div>
                 <div className="prop-row"><span className="k">Local ID</span><span className="v">{selected.localId}</span></div>
-                {properties ? Object.entries(properties).map(([k,v]) => (
-                  <div className="prop-row" key={k}><span className="k">{k}</span><span className="v">{formatVal(v)}</span></div>
-                )) : <div className="muted">No properties</div>}
+                {properties ? (
+                  <GroupedProperties props={properties} />
+                ) : (
+                  <div className="muted">No properties</div>
+                )}
               </div>
             ) : (<div className="muted">Click an element to view its properties.</div>)}
           </div>
@@ -456,21 +702,222 @@ function formatVal(v: any) {
   } catch { return String(v); }
 }
 
+// Group properties into IFC Attributes and Property Sets (Psets)
+const GroupedProperties: React.FC<{ props: Record<string, any> }> = ({ props }) => {
+  // Heuristics: Psets often come prefixed with 'Pset_' or vendor prefixes, and many core IFC attributes use leading underscore
+  const attributes: Array<[string, any]> = [];
+  const psetsMap: Map<string, Array<[string, any]>> = new Map();
+
+  for (const [k, v] of Object.entries(props)) {
+    // Skip internal/empty
+    if (v == null) continue;
+    // Group known non-pset attributes
+    const isCore = k.startsWith('_') || ['GlobalId','ObjectType','IfcClass','IfcSystem','Name','Description','Tag'].includes(k);
+    // Detect pset names like 'Pset_*' or vendor prefixes like 'NV_*', 'BS_*', etc.
+    const psetMatch = /^([A-Za-z]+_[A-Za-z0-9]+)(?:\.|_|:)?(.*)$/.exec(k);
+    if (!isCore && psetMatch && psetMatch[1] && k.includes('_')) {
+      const psetName = psetMatch[1];
+      const propKey = psetMatch[2] || k.replace(psetName, '').replace(/^[_:.]/, '') || k;
+      const arr = psetsMap.get(psetName) ?? [];
+      arr.push([propKey || k, v]);
+      psetsMap.set(psetName, arr);
+    } else {
+      attributes.push([k, v]);
+    }
+  }
+
+  // Also accept nested Pset objects if present (e.g., props.Psets = { Pset_X: { A:1 } })
+  const nestedPsets = (props as any).Psets && typeof (props as any).Psets === 'object' ? (props as any).Psets : null;
+  if (nestedPsets) {
+    for (const [psetName, pObj] of Object.entries(nestedPsets)) {
+      const target = psetsMap.get(psetName) ?? [];
+      if (pObj && typeof pObj === 'object') {
+        for (const [pk, pv] of Object.entries(pObj as any)) {
+          target.push([pk, pv]);
+        }
+      }
+      psetsMap.set(psetName, target);
+    }
+  }
+
+  // Render
+  return (
+    <div>
+      <details open>
+        <summary style={{ fontWeight: 600 }}>IFC Attributes</summary>
+        {attributes.length ? attributes.map(([k,v]) => (
+          <div className="prop-row" key={`attr-${k}`}><span className="k">{k}</span><span className="v">{formatVal(v)}</span></div>
+        )) : <div className="muted">No attributes</div>}
+      </details>
+
+      {[...psetsMap.entries()].sort(([a],[b]) => a.localeCompare(b)).map(([pset, kvs]) => (
+        <details key={`pset-${pset}`} open style={{ marginTop: 8 }}>
+          <summary style={{ fontWeight: 600 }}>{pset}</summary>
+          {kvs.length ? kvs.map(([k,v], i) => (
+            <div className="prop-row" key={`pset-row-${pset}-${i}`}><span className="k">{k}</span><span className="v">{formatVal(v)}</span></div>
+          )) : <div className="muted">No properties</div>}
+        </details>
+      ))}
+    </div>
+  );
+};
+
 // Minimal recursive explorer using <details>/<summary>
-const ExplorerTree: React.FC<{ tree: any; onPick: (localId: number) => void }>
-  = ({ tree, onPick }) => {
-  const renderNode = (node: any) => {
-    const id = typeof node.expressID === 'number' ? node.expressID : undefined;
-    const label = node.name || node.type || (id != null ? `#${id}` : 'Item');
+const ExplorerTree: React.FC<{
+  tree: any;
+  modelId: string | null;
+  onPick: (localId: number) => void;
+  labelFor: (id: number, fallback: string) => string;
+  requestLabel: (id: number) => void;
+}> = ({ tree, modelId, onPick, labelFor, requestLabel }) => {
+  const Node: React.FC<{ node: any }> = ({ node }) => {
+    const id = getNodeId(node);
+    const baseType = getTypeText(node);
     const children: any[] = Array.isArray(node.children) ? node.children : [];
+    const cached = id != null ? labelFor(id, '') : '';
+    React.useEffect(() => {
+      if (id != null && modelId) {
+        // Request name for this ID; parent will no-op if already cached
+        requestLabel(id);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id, modelId]);
+    const key = id != null ? `${id}` : `${baseType ?? 'Group'}-${Math.random()}`;
+    // Show only Name when available; otherwise show category/group fallbacks without ID
+    const decorated = (() => {
+      if (cached) {
+        return `${cached}`;
+      }
+      if (id == null) {
+        if (baseType && children.length) return `${baseType} (${children.length})`;
+        if (baseType) return baseType;
+        if (children.length) return `Group (${children.length})`;
+        return 'Item';
+      }
+      // id present but no name yet — show only category/type without ID
+      if (baseType) return `${baseType}`;
+      return 'Item';
+    })();
+
     return (
-      <details open key={`${label}-${id ?? Math.random()}`}>
-        <summary onClick={(e) => { e.stopPropagation(); if (id != null) onPick(id); }}>{label}{id != null ? ` (#${id})` : ''}</summary>
-        {children.map((c) => renderNode(c))}
+      <details open key={key}>
+        <summary onClick={(e) => { e.stopPropagation(); if (id != null) onPick(id); }}>{decorated}</summary>
+        {children.map((c, i) => {
+          const cid = getNodeId(c);
+          return <Node node={c} key={(cid != null ? cid : i)} />
+        })}
       </details>
     );
   };
-  return <div>{renderNode(tree)}</div>;
+  return <div><Node node={tree} /></div>;
 };
+
+function getNodeId(node: any): number | undefined {
+  if (!node) return undefined;
+  // Direct primitives
+  if (typeof node === 'number' && Number.isFinite(node)) return node;
+  if (typeof node !== 'object') return undefined;
+  const direct = tryParseId(node);
+  if (direct != null) return direct;
+  // Shallow nested scan (one level) for common wrappers
+  for (const key of Object.keys(node)) {
+    const v = (node as any)[key];
+    if (v && typeof v === 'object') {
+      const nested = tryParseId(v);
+      if (nested != null) return nested;
+    }
+  }
+  return undefined;
+}
+
+function tryParseId(obj: any): number | undefined {
+  if (!obj || typeof obj !== 'object') return undefined;
+  const candidates = ['expressID', 'expressId', 'id', 'ID', 'localId', 'LocalId'];
+  for (const k of candidates) {
+    const v = obj[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string') {
+      const n = Number(v);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return undefined;
+}
+
+function getTypeText(node: any): string | null {
+  if (!node || typeof node !== 'object') return null;
+  // Prefer category labels in fragments spatial trees
+  const catRaw = (node as any).category ?? (node as any).Category ?? (node as any)._category ?? (node as any).categoryName;
+  const catText = toText(catRaw?.name ?? catRaw?.type ?? catRaw?.value ?? catRaw);
+  if (catText && catText.trim()) return catText;
+  const typeKeys = ['type','Type','TYPE','ifcType'];
+  for (const k of typeKeys) {
+    const v = (node as any)[k];
+    const t = toText(v);
+    if (t && t.trim()) return t;
+  }
+  return null;
+}
+
+function sampleExplorerTree(root: any) {
+  const limitChildren = 8;
+  const pick = (n: any, depth = 0): any => {
+    if (n == null) return n;
+    if (depth > 2) return '…';
+    if (typeof n !== 'object') return n;
+    const id = getNodeId(n);
+    const type = getTypeText(n);
+    const keys = Object.keys(n);
+    const children: any[] = Array.isArray((n as any).children) ? (n as any).children : [];
+    return {
+      id,
+      type,
+      keys,
+      children: children.slice(0, limitChildren).map(c => pick(c, depth + 1)),
+      moreChildren: Math.max(0, children.length - limitChildren)
+    };
+  };
+  return pick(root, 0);
+}
+
+function extractName(props: any): string | null {
+  if (!props) return null;
+  let v: any = props.Name ?? props.name ?? props.NAME
+    ?? props.LongName ?? props.longName ?? props.LONGNAME
+    ?? props.ObjectType ?? props.objectType ?? props.OBJECTTYPE
+    ?? props.Tag ?? props.tag ?? props.TAG
+    ?? props.Description ?? props.description ?? props.DESCRIPTION
+    ?? props.GlobalId ?? props.globalId ?? props.GLOBALID;
+  if (v == null) return null;
+  if (typeof v === 'string') return v || null;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  try {
+    // Common patterns: { value: '...' } or { value: { value: '...' } }
+    if (typeof v === 'object') {
+      if ('value' in v) {
+        const val = (v as any).value;
+        if (typeof val === 'string') return val || null;
+        if (val && typeof val === 'object' && 'value' in val) {
+          const val2 = (val as any).value;
+          if (typeof val2 === 'string') return val2 || null;
+        }
+        if (val != null && typeof val !== 'object') return String(val);
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function toText(v: any): string | null {
+  if (v == null) return null;
+  if (typeof v === 'string') return v || null;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  try {
+    if (typeof v === 'object' && 'value' in v) {
+      return toText((v as any).value);
+    }
+  } catch {}
+  return null;
+}
 
 export default App;
