@@ -28,7 +28,7 @@ import * as THREE from 'three';
 import Stats from 'stats.js';
 import ChatWindow from './ChatWindow';
 
-type Selected = { modelId: string; localId: number } | null;
+type Selection = { modelId: string; localId: number };
 
 type PropertyRow = {
   label: string;
@@ -44,6 +44,16 @@ type PropertyNode = {
   value?: string;
   children: PropertyNode[];
   searchText: string;
+};
+
+type ItemsDataTableData = {
+  Name: string;
+  Value: any;
+};
+
+type ItemsDataGroup = {
+  data: ItemsDataTableData;
+  children?: ItemsDataGroup[];
 };
 
 type ModelSummary = {
@@ -182,6 +192,121 @@ const extractNominalValue = (value: any): string => {
     return `${formatPrimitive(value.x)}, ${formatPrimitive(value.y)}, ${formatPrimitive(value.z)}`;
   }
   return formatPrimitive(value);
+};
+
+const stringifyItemsDataValue = (value: any): string => {
+  if (value == null) return '';
+  if (Array.isArray(value)) {
+    return value.map((entry) => stringifyItemsDataValue(entry)).filter(Boolean).join(', ');
+  }
+  if (typeof value === 'object') {
+    if ('NominalValue' in value) return stringifyItemsDataValue((value as any).NominalValue);
+    if ('nominalValue' in value) return stringifyItemsDataValue((value as any).nominalValue);
+    if ('value' in value) return stringifyItemsDataValue((value as any).value);
+    if ('Value' in value) return stringifyItemsDataValue((value as any).Value);
+    const coords = ['x', 'y', 'z'];
+    if (coords.every((axis) => typeof (value as any)[axis] === 'number')) {
+      return coords.map((axis) => formatPrimitive((value as any)[axis])).join(', ');
+    }
+    try {
+      const json = JSON.stringify(value);
+      return json && json !== '{}' ? json : '';
+    } catch {
+      return String(value);
+    }
+  }
+  return formatPrimitive(value);
+};
+
+const collectItemsDataRows = (groups: ItemsDataGroup[], prefix: string[] = []) => {
+  const rows: { path: string; value: string }[] = [];
+  for (const group of groups) {
+    if (!group || !group.data) continue;
+    const name = typeof group.data.Name === 'string' ? group.data.Name.trim() : String(group.data.Name ?? '');
+    const pathParts = name ? [...prefix, name] : [...prefix];
+    const path = pathParts.filter(Boolean).join(' / ');
+    const valueText = stringifyItemsDataValue(group.data.Value);
+    if (path && valueText !== '') {
+      rows.push({ path, value: valueText });
+    }
+    if (group.children && group.children.length) {
+      rows.push(...collectItemsDataRows(group.children, pathParts));
+    }
+  }
+  return rows;
+};
+
+const findFirstValueByKeywords = (source: any, keywords: string[]): string | undefined => {
+  if (!source || typeof source !== 'object') return undefined;
+  const lowered = keywords.map((keyword) => keyword.toLowerCase());
+  const visited = new WeakSet<object>();
+  const stack: any[] = [source];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== 'object') continue;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    if (Array.isArray(current)) {
+      for (const entry of current) {
+        if (entry && typeof entry === 'object') {
+          stack.push(entry);
+        }
+      }
+      continue;
+    }
+    for (const [key, value] of Object.entries(current as Record<string, any>)) {
+      const keyLower = key.toLowerCase();
+      if (lowered.some((keyword) => keyLower.includes(keyword))) {
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (trimmed) return trimmed;
+        } else if (typeof value === 'number' && Number.isFinite(value)) {
+          return value.toString();
+        } else if (typeof value === 'boolean') {
+          return value ? 'true' : 'false';
+        }
+      }
+      if (value && typeof value === 'object') {
+        stack.push(value);
+      }
+    }
+  }
+  return undefined;
+};
+
+const summariseItemDataForAI = (data: any, detailLimit: number): string => {
+  if (!data || typeof data !== 'object') {
+    return stringifyLimited(data, 300);
+  }
+  const parts: string[] = [];
+  const name = readName(data) ?? findFirstValueByKeywords(data, ['name', 'label', 'description']);
+  if (name) parts.push(`name:${name}`);
+  const category = findFirstValueByKeywords(data, ['category', 'ifcclass', 'ifc type', 'type']);
+  if (category) parts.push(`category:${category}`);
+  const globalId = findFirstValueByKeywords(data, ['globalid', 'global id', 'guid']);
+  if (globalId) parts.push(`globalId:${globalId}`);
+  const expressId = findFirstValueByKeywords(data, ['expressid', 'express id']);
+  if (expressId && expressId !== globalId) parts.push(`expressId:${expressId}`);
+  if (detailLimit > 0) {
+    try {
+      const { rows } = buildPropertyData(data);
+      if (rows.length) {
+        const detailRows = rows.slice(0, detailLimit);
+        const detail = detailRows.map((row) => `${row.label}=${row.value}`).join(' | ');
+        if (detail) parts.push(`props:${detail}`);
+        if (rows.length > detailLimit) {
+          parts.push(`propsTruncated:${rows.length - detailLimit}`);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to build detailed property data for AI summary', err);
+    }
+  }
+  const summary = parts.filter(Boolean).join(' | ');
+  if (!summary) {
+    return stringifyLimited(data, 300);
+  }
+  return summary.length > 1200 ? `${summary.slice(0, 1200)}…` : summary;
 };
 
 const TOP_LEVEL_LABELS: Record<string, string> = {
@@ -332,7 +457,7 @@ const App: React.FC = () => {
   const workerUrlRef = useRef<string | null>(null);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [models, setModels] = useState<{ id: string; label: string }[]>([]);
-  const [selected, setSelected] = useState<Selected>(null);
+  const [selectedItems, setSelectedItems] = useState<Selection[]>([]);
   const [properties, setProperties] = useState<Record<string, any> | null>(null);
   const [isExplorerOpen, setIsExplorerOpen] = useState(true);
   const [isExplorerMinimized, setIsExplorerMinimized] = useState(false);
@@ -358,7 +483,7 @@ const App: React.FC = () => {
   const itemsDataElementRef = useRef<HTMLElement | null>(null);
   const updateItemsDataRef = useRef<ReturnType<typeof BUIC.tables.itemsData>[1] | null>(null);
   const hiderRef = useRef<OBC.Hider | null>(null);
-  const selectedRef = useRef<Selected>(null);
+  const selectedRef = useRef<Selection[]>([]);
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number } | null>(null);
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
   const [propertySearch, setPropertySearch] = useState('');
@@ -367,6 +492,8 @@ const App: React.FC = () => {
   const [isChatOpen, setIsChatOpen] = useState(true);
   const [chatExpandSignal, setChatExpandSignal] = useState(0);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
+  const [lastItemsDataTSV, setLastItemsDataTSV] = useState<string | null>(null);
+  const [lastItemsDataRows, setLastItemsDataRows] = useState<{ path: string; value: string }[]>([]);
 
   const matchedPropertyRows = useMemo(() => {
     const term = propertySearch.trim().toLowerCase();
@@ -391,8 +518,8 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    selectedRef.current = selected;
-  }, [selected]);
+    selectedRef.current = selectedItems;
+  }, [selectedItems]);
 
 
   useEffect(() => {
@@ -531,20 +658,31 @@ const App: React.FC = () => {
     navCanvas.addEventListener('click', onNavClick);
 
     const highlightHandler = async (modelIdMap: Record<string, Set<number>>) => {
-      const firstEntry = Object.entries(modelIdMap)[0];
-      if (!firstEntry) return;
-      const [modelId, ids] = firstEntry;
-      const iterator = ids.values().next();
-      if (iterator.done) return;
-      const localId = iterator.value;
-      setSelected({ modelId, localId });
+      const selections: Selection[] = [];
+      for (const [modelId, ids] of Object.entries(modelIdMap)) {
+        ids.forEach((id) => {
+          if (Number.isInteger(id)) {
+            selections.push({ modelId, localId: id });
+          }
+        });
+      }
+      setSelectedItems(selections);
       handleExplorerOpen();
+
       const fragments = fragmentsRef.current;
-      if (!fragments) return;
-      const model = fragments.list.get(modelId);
-      if (!model) return;
+      if (!fragments || !selections.length) {
+        updateSelectedProperties(null);
+        return;
+      }
+
+      const primary = selections[0];
+      const model = fragments.list.get(primary.modelId);
+      if (!model) {
+        updateSelectedProperties(null);
+        return;
+      }
       try {
-        const [data] = await model.getItemsData([localId]);
+        const [data] = await model.getItemsData([primary.localId]);
         updateSelectedProperties(data || null);
       } catch (error) {
         console.warn('Failed to fetch properties for selection', error);
@@ -552,7 +690,7 @@ const App: React.FC = () => {
     };
 
     const clearHandler = () => {
-      setSelected(null);
+      setSelectedItems([]);
       updateSelectedProperties(null);
     };
 
@@ -595,6 +733,30 @@ const App: React.FC = () => {
       }
     };
 
+    const registerItemsDataListener = (table: BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void }) => {
+      if (!table || table.__aiDataHandler) return;
+      const handler = () => {
+        const groups = Array.isArray(table.data) ? table.data : [];
+        if (!groups.length) {
+          setLastItemsDataTSV(null);
+          setLastItemsDataRows([]);
+          return;
+        }
+        try {
+          const snapshot = table.tsv;
+          setLastItemsDataTSV(typeof snapshot === 'string' && snapshot.trim() ? snapshot : null);
+          const flattened = collectItemsDataRows(groups as unknown as ItemsDataGroup[]);
+          setLastItemsDataRows(flattened);
+        } catch (err) {
+          console.warn('Failed to capture ItemsData snapshot for AI context', err);
+          setLastItemsDataRows([]);
+        }
+      };
+      table.__aiDataHandler = handler;
+      table.addEventListener('datacomputed', handler);
+      handler();
+    };
+
     ensureChild(modelsListContainerRef.current, modelsListElementRef, () => {
       const [element, update] = BUIC.tables.modelsList({ components });
       updateModelsListRef.current = update;
@@ -620,25 +782,45 @@ const App: React.FC = () => {
       element.style.width = '100%';
       element.style.height = '100%';
       element.style.overflow = 'auto';
-      const tableElement = element as BUI.Table<any> & {
+      const tableElement = element as BUI.Table<ItemsDataTableData> & {
         queryString: string | null;
         preserveStructureOnFilter?: boolean;
         indentationInText?: boolean;
+        __aiDataHandler?: () => void;
       };
       tableElement.preserveStructureOnFilter = true;
       tableElement.indentationInText = false;
       tableElement.queryString = propertySearch.trim() ? propertySearch.trim() : null;
       const currentSelection = selectedRef.current;
-      const modelIdMap = currentSelection
-        ? { [currentSelection.modelId]: new Set<number>([currentSelection.localId]) }
-        : {};
+      const modelIdMap: Record<string, Set<number>> = {};
+      if (currentSelection && currentSelection.length) {
+        for (const entry of currentSelection) {
+          if (!modelIdMap[entry.modelId]) {
+            modelIdMap[entry.modelId] = new Set<number>();
+          }
+          modelIdMap[entry.modelId].add(entry.localId);
+        }
+      }
       update({
         components,
         modelIdMap,
-        emptySelectionWarning: true,
+        emptySelectionWarning: !currentSelection || currentSelection.length === 0,
       });
+      registerItemsDataListener(tableElement);
       return element;
     });
+
+    if (itemsDataElementRef.current) {
+      registerItemsDataListener(itemsDataElementRef.current as BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void });
+    }
+
+    return () => {
+      const table = itemsDataElementRef.current as (BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void }) | null;
+      if (table?.__aiDataHandler) {
+        table.removeEventListener('datacomputed', table.__aiDataHandler);
+        delete table.__aiDataHandler;
+      }
+    };
 
   }, [componentsReady, isExplorerOpen, propertySearch]);
 
@@ -648,16 +830,22 @@ const App: React.FC = () => {
     const updateItemsData = updateItemsDataRef.current;
     if (!components || !updateItemsData) return;
 
-    const modelIdMap = selected
-      ? { [selected.modelId]: new Set<number>([selected.localId]) }
-      : {};
+    const modelIdMap: Record<string, Set<number>> = {};
+    if (selectedItems.length) {
+      for (const entry of selectedItems) {
+        if (!modelIdMap[entry.modelId]) {
+          modelIdMap[entry.modelId] = new Set<number>();
+        }
+        modelIdMap[entry.modelId].add(entry.localId);
+      }
+    }
 
     updateItemsData({
       components,
       modelIdMap,
-      emptySelectionWarning: true,
+      emptySelectionWarning: selectedItems.length === 0,
     });
-  }, [componentsReady, selected]);
+  }, [componentsReady, selectedItems]);
 
   useEffect(() => {
     const table = itemsDataElementRef.current as (BUI.Table<any> & { queryString?: string | null }) | null;
@@ -937,34 +1125,110 @@ const App: React.FC = () => {
       }
     }
 
-    if (selected) {
-      lines.push(`Selected element => modelId: ${selected.modelId}, localId: ${selected.localId}`);
-      let selectedProps = properties;
-      if ((!selectedProps || Object.keys(selectedProps).length === 0) && fr) {
-        const model = fr.list.get(selected.modelId);
-        if (model) {
-          try {
-            const [data] = await model.getItemsData([selected.localId]);
-            selectedProps = data || null;
-          } catch (err) {
-            console.warn('Failed to fetch properties for AI context', err);
+    if (selectedItems.length) {
+      lines.push(`Active selection count: ${selectedItems.length}`);
+      for (let idx = 0; idx < selectedItems.length; idx += 1) {
+        const selection = selectedItems[idx];
+        lines.push(`Selection #${idx + 1} → modelId:${selection.modelId}, localId:${selection.localId}`);
+        let snapshot: Record<string, any> | null = null;
+        if (idx === 0 && properties && Object.keys(properties).length) {
+          snapshot = properties;
+        } else if (fr) {
+          const model = fr.list.get(selection.modelId);
+          if (model) {
+            try {
+              const [data] = await model.getItemsData([selection.localId]);
+              snapshot = data || null;
+            } catch (err) {
+              console.warn('Failed to fetch properties for AI context (multi)', err);
+            }
           }
         }
-      }
-      if (selectedProps) {
-        lines.push('Selected element properties (raw snapshot):');
-        lines.push(stringifyLimited(selectedProps, 8000));
-      } else {
-        lines.push('Selected element properties are not currently available.');
-      }
-  const rows = propertyRows.length ? propertyRows : buildPropertyData(selectedProps).rows;
-      if (rows.length) {
-        lines.push(`Selected element property count: ${rows.length}`);
-        lines.push('Selected element flattened properties:');
-        for (const row of rows) {
-          lines.push(`- ${row.label}: ${row.value}`);
+        if (snapshot) {
+          lines.push('  Property snapshot (compact JSON):');
+          lines.push(`  ${stringifyLimited(snapshot, 4000)}`);
+          const rowsForSelection = buildPropertyData(snapshot).rows;
+          if (rowsForSelection.length) {
+            lines.push(`  Flattened properties (${rowsForSelection.length} entries):`);
+            for (const row of rowsForSelection.slice(0, 120)) {
+              lines.push(`  - ${row.label}: ${row.value}`);
+            }
+            if (rowsForSelection.length > 120) {
+              lines.push(`  (Truncated ${rowsForSelection.length - 120} additional properties)`);
+            }
+          }
+        } else {
+          lines.push('  Properties for this selection are not available yet.');
         }
       }
+    } else {
+      lines.push('No active selection — exporting properties for every loaded element.');
+      if (fr && fr.list.size) {
+        for (const info of models) {
+          const record = fr.list.get(info.id);
+          if (!record) {
+            lines.push(`Model ${info.label} [${info.id}] could not be found in the fragments registry.`);
+            continue;
+          }
+          try {
+            const retrievedIds = await record.getLocalIds();
+            const localIds = Array.isArray(retrievedIds)
+              ? retrievedIds
+              : retrievedIds
+                ? Array.from(retrievedIds as Iterable<number>)
+                : [];
+            if (!localIds || localIds.length === 0) {
+              lines.push(`Model ${info.label} [${info.id}] has no retrievable local IDs.`);
+              continue;
+            }
+            lines.push(`Model ${info.label} [${info.id}] — enumerating ${localIds.length} items:`);
+            const detailLimit = localIds.length <= 40 ? 12 : localIds.length <= 120 ? 6 : 3;
+            const chunkSize = 50;
+            for (let offset = 0; offset < localIds.length; offset += chunkSize) {
+              const chunk = localIds.slice(offset, offset + chunkSize);
+              let batch: any[] = [];
+              try {
+                batch = await record.getItemsData(chunk);
+              } catch (err) {
+                const start = chunk[0];
+                const end = chunk[chunk.length - 1];
+                lines.push(`  Failed to retrieve properties for items ${start}–${end}: ${(err as any)?.message ?? err}`);
+                continue;
+              }
+              chunk.forEach((localId, position) => {
+                const data = batch?.[position];
+                if (!data) {
+                  lines.push(`- localId:${localId} (no data available)`);
+                  return;
+                }
+                const summary = summariseItemDataForAI(data, detailLimit).replace(/\s+/g, ' ').trim();
+                lines.push(`- localId:${localId} | ${summary}`);
+              });
+            }
+          } catch (err) {
+            lines.push(`Failed to enumerate items for model ${info.label} [${info.id}]: ${(err as any)?.message ?? err}`);
+          }
+        }
+      } else {
+        lines.push('Fragments data is not available to enumerate model items.');
+      }
+    }
+
+    if (lastItemsDataRows.length) {
+      lines.push('ItemsData extracted name/value pairs (last selection):');
+      const cap = 150;
+      const limitedRows = lastItemsDataRows.slice(0, cap);
+      for (const row of limitedRows) {
+        lines.push(`- ${row.path}: ${row.value}`);
+      }
+      if (lastItemsDataRows.length > cap) {
+        lines.push(`(Truncated ${lastItemsDataRows.length - cap} additional rows)`);
+      }
+    }
+
+    if (lastItemsDataTSV) {
+      lines.push('ItemsData table snapshot for last selection (tab-separated):');
+      lines.push(lastItemsDataTSV);
     }
 
     if (lines.length === 0) {
@@ -972,7 +1236,7 @@ const App: React.FC = () => {
     }
 
     return lines.join('\n');
-  }, [models, selected, properties, propertyRows, modelSummaries]);
+  }, [models, selectedItems, properties, propertyRows, modelSummaries, lastItemsDataTSV, lastItemsDataRows]);
 
   const fitToCurrentModel = useCallback(async () => {
     const world = worldRef.current;
@@ -1012,24 +1276,28 @@ const App: React.FC = () => {
   const hideSelected = useCallback(async () => {
     const selection = selectedRef.current;
     const hider = hiderRef.current;
-    if (!selection || !hider) {
+    if (!selection || selection.length === 0 || !hider) {
       setContextMenu(null);
       return;
     }
-    const modelIdMap: Record<string, Set<number>> = {
-      [selection.modelId]: new Set([selection.localId]),
-    };
+    const modelIdMap: Record<string, Set<number>> = {};
+    for (const entry of selection) {
+      if (!modelIdMap[entry.modelId]) {
+        modelIdMap[entry.modelId] = new Set<number>();
+      }
+      modelIdMap[entry.modelId].add(entry.localId);
+    }
     try {
       await hider.set(false, modelIdMap);
       try { highlighterRef.current?.clear?.(); } catch {}
-      setSelected(null);
+      setSelectedItems([]);
       updateSelectedProperties(null);
     } catch (error) {
       console.warn('Failed to hide selected element', error);
     } finally {
       setContextMenu(null);
     }
-  }, [setContextMenu, setSelected, updateSelectedProperties]);
+  }, [setContextMenu, setSelectedItems, updateSelectedProperties]);
 
   const resetHidden = useCallback(async () => {
     const hider = hiderRef.current;
@@ -1160,7 +1428,7 @@ const App: React.FC = () => {
         marker.visible = true;
       } catch { /* non-fatal */ }
 
-      setSelected({ modelId: best.model.modelId, localId: best.localId });
+  setSelectedItems([{ modelId: best.model.modelId, localId: best.localId }]);
       handleExplorerOpen();
       try {
   const [data] = await best.model.getItemsData([best.localId]);
@@ -1179,7 +1447,7 @@ const App: React.FC = () => {
     const onContextMenu = (ev: MouseEvent) => {
       ev.preventDefault();
       const currentSelection = selectedRef.current;
-      if (!currentSelection) {
+      if (!currentSelection || currentSelection.length === 0) {
         setContextMenu(null);
         return;
       }
@@ -1481,7 +1749,7 @@ const App: React.FC = () => {
         anchorReference="anchorPosition"
         anchorPosition={contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined}
       >
-        <MenuItem onClick={hideSelected} disabled={!selected}>
+  <MenuItem onClick={hideSelected} disabled={selectedItems.length === 0}>
           Hide selected element
         </MenuItem>
         <MenuItem onClick={resetHidden}>

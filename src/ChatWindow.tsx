@@ -153,13 +153,36 @@ ${question}`
     } catch (error) {
       console.error('Error calling Gemini API:', error);
       let hint = 'Sorry, I encountered an error while talking to Gemini.';
-      if (error instanceof Error) {
-        if (error.message === 'MISSING_GEMINI_KEY') {
-          hint = 'Gemini API key is missing. Set VITE_GEMINI_API_KEY and reload the app.';
-        } else if (error.message.includes('404')) {
-          hint = 'Gemini returned 404 for gemini-2.5-flash-latest. Verify the model name is available to your project (use ListModels in Google AI Studio or switch to another released variant).';
+      const asAny = error as any;
+      const message = asAny?.message ?? (error instanceof Error ? error.message : '');
+      const status = asAny?.status ?? asAny?.code ?? '';
+      const lowerMessage = typeof message === 'string' ? message.toLowerCase() : '';
+
+      if (message === 'MISSING_GEMINI_KEY') {
+        hint = 'Gemini API key is missing. Set VITE_GEMINI_API_KEY and reload the app.';
+      } else if (lowerMessage.includes('401') || status === 401) {
+        hint = 'Gemini rejected the API key (401). Confirm the key is valid and has access to the requested model.';
+      } else if (lowerMessage.includes('403') || status === 403) {
+        hint = 'Gemini returned 403. Ensure the project has access to this model and that billing is enabled.';
+      } else if (lowerMessage.includes('404') || status === 404) {
+        hint = 'Gemini returned 404 for this model. Verify the model name and availability in your project (use ListModels in Google AI Studio or switch to a supported variant).';
+      } else if (lowerMessage.includes('429') || status === 429) {
+        const retry = typeof asAny?.error?.error?.details?.[2]?.retryDelay === 'string'
+          ? asAny.error.error.details[2].retryDelay
+          : asAny?.error?.error?.details?.find?.((detail: any) => typeof detail?.retryDelay === 'string')?.retryDelay;
+        const waitText = retry ? ` Please wait ~${retry.replace(/s$/, ' seconds')} before retrying.` : '';
+        hint = `Gemini quota exceeded (429). You've hit the free tier input-token limit. ${waitText} Consider reducing prompt size, waiting a minute, or upgrading quota.`;
+      } else if (lowerMessage.includes('quota') || lowerMessage.includes('limit')) {
+        hint = 'Gemini reported a quota issue. Check your plan, reduce prompt size, or wait before retrying.';
+      }
+
+      if (typeof asAny?.error === 'object') {
+        const retryInfo = asAny.error?.error?.details?.find?.((detail: any) => typeof detail?.retryDelay === 'string');
+        if (!hint.includes('quota') && retryInfo?.retryDelay) {
+          hint += ` Gemini suggests waiting ~${retryInfo.retryDelay.replace(/s$/, ' seconds')} before retrying.`;
         }
       }
+
       const errorMessage: Message = { role: 'system', text: hint };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
