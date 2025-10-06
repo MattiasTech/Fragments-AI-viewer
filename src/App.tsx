@@ -26,7 +26,7 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import * as THREE from 'three';
 import Stats from 'stats.js';
-import ChatWindow from './ChatWindow';
+import ChatWindow, { SelectionCommand } from './ChatWindow';
 
 type Selection = { modelId: string; localId: number };
 
@@ -66,6 +66,20 @@ type ModelSummary = {
   bboxSize: { x: number; y: number; z: number };
   bboxCenter: { x: number; y: number; z: number };
   collectedAt: number;
+};
+
+const FILTER_KEY_ALIASES: Record<string, string[]> = {
+  category: ['category', 'ifccategory', 'ifcclass', 'class'],
+  type: ['type', 'ifctype', 'typemark', 'typename'],
+  system: ['system', 'systemtype'],
+  name: ['name', 'label', 'description'],
+  material: ['material', 'materialname'],
+  guid: ['guid', 'globalid', 'global id'],
+  globalid: ['globalid', 'guid', 'global id'],
+  family: ['family', 'familyname'],
+  level: ['level', 'storey', 'story', 'buildingstorey'],
+  discipline: ['discipline'],
+  phase: ['phase'],
 };
 
 const pickCategoryLabel = (userData: Record<string, any>, fallback: string): string => {
@@ -470,6 +484,7 @@ const App: React.FC = () => {
   const navCubeState = useRef<{ scene: THREE.Scene; camera: THREE.PerspectiveCamera; renderer: THREE.WebGLRenderer; cube: THREE.Mesh } | null>(null);
   const selectionMarkerRef = useRef<THREE.Group | null>(null);
   const prevInstanceHighlightRef = useRef<{ mesh: THREE.InstancedMesh; index: number } | null>(null);
+  const aiSelectionSeqRef = useRef(0);
   const highlighterRef = useRef<any>(null);
   const [explorerSize, setExplorerSize] = useState({ width: 360, height: 520 });
   const explorerResizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
@@ -489,7 +504,7 @@ const App: React.FC = () => {
   const [propertySearch, setPropertySearch] = useState('');
   const [isModelsSectionCollapsed, setIsModelsSectionCollapsed] = useState(false);
   const [isPropertiesSectionCollapsed, setIsPropertiesSectionCollapsed] = useState(false);
-  const [isChatOpen, setIsChatOpen] = useState(true);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatExpandSignal, setChatExpandSignal] = useState(0);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
   const [lastItemsDataTSV, setLastItemsDataTSV] = useState<string | null>(null);
@@ -509,12 +524,26 @@ const App: React.FC = () => {
   }, []);
 
   const openChatWindow = useCallback(() => {
-    setIsChatOpen(true);
-    setChatExpandSignal((prev) => prev + 1);
+    setIsChatOpen((prev) => {
+      if (!prev) {
+        setChatExpandSignal((signal) => signal + 1);
+      }
+      return true;
+    });
   }, []);
 
   const closeChatWindow = useCallback(() => {
     setIsChatOpen(false);
+  }, []);
+
+  const toggleChatWindow = useCallback(() => {
+    setIsChatOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setChatExpandSignal((signal) => signal + 1);
+      }
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -1014,6 +1043,16 @@ const App: React.FC = () => {
     setIsExplorerMinimized(false);
   }, []);
 
+  const toggleExplorerWindow = useCallback(() => {
+    setIsExplorerOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setIsExplorerMinimized(false);
+      }
+      return next;
+    });
+  }, []);
+
   const handleExplorerClose = useCallback(() => {
     setIsExplorerOpen(false);
   }, []);
@@ -1021,6 +1060,234 @@ const App: React.FC = () => {
   const toggleExplorerMinimized = useCallback(() => {
     setIsExplorerMinimized((prev) => !prev);
   }, []);
+
+  const handleAISelection = useCallback(async (command: SelectionCommand) => {
+    const normalizeFilter = (source: Record<string, any> | undefined) => {
+      type Term = { type: 'field'; key: string; value: string } | { type: 'text'; value: string };
+      const terms: Term[] = [];
+      const modelIds = new Set<string>();
+      if (!source || typeof source !== 'object') {
+        return { terms, modelIds };
+      }
+      for (const [rawKey, rawValue] of Object.entries(source)) {
+        if (rawValue == null) continue;
+        const keyLower = rawKey.trim().toLowerCase();
+        const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+        if (!values.length) continue;
+
+        if (keyLower === 'modelid' || keyLower === 'modelids' || keyLower === 'model') {
+          for (const entry of values) {
+            const text = typeof entry === 'string' ? entry.trim() : String(entry ?? '').trim();
+            if (text) modelIds.add(text);
+          }
+          continue;
+        }
+
+        if (['text', 'query', 'keyword', 'search'].includes(keyLower)) {
+          for (const entry of values) {
+            if (entry == null) continue;
+            const text = typeof entry === 'string' ? entry.trim().toLowerCase() : String(entry ?? '').trim().toLowerCase();
+            if (text) terms.push({ type: 'text', value: text });
+          }
+          continue;
+        }
+
+        for (const entry of values) {
+          if (entry == null) continue;
+          let text: string | null = null;
+          if (typeof entry === 'string') text = entry.trim();
+          else if (typeof entry === 'number' || typeof entry === 'boolean') text = String(entry);
+          if (!text) continue;
+          terms.push({ type: 'field', key: keyLower, value: text.toLowerCase() });
+        }
+      }
+      return { terms, modelIds };
+    };
+
+    const fragments = fragmentsRef.current;
+    if (!fragments) {
+      console.warn('AI selection requested but fragments are unavailable.');
+      return;
+    }
+
+    const highlighter = highlighterRef.current;
+    const hider = hiderRef.current;
+
+    const { terms, modelIds } = normalizeFilter(command.filter);
+    const normalizedMode = command.mode?.toLowerCase?.() as ('highlight' | 'isolate' | 'focus' | undefined);
+    const isolate = normalizedMode === 'isolate' || normalizedMode === 'focus';
+
+    if (command.action === 'clear') {
+      try { highlighter?.clear?.(); } catch {}
+      if (hider) {
+        try { await hider.set(true); } catch (err) { console.warn('Failed to reset visibility while clearing AI selection', err); }
+      }
+      try {
+        const prev = prevInstanceHighlightRef.current;
+        if (prev && prev.mesh && prev.mesh.instanceColor) {
+          const white = new THREE.Color(1, 1, 1);
+          prev.mesh.setColorAt(prev.index, white);
+          prev.mesh.instanceColor.needsUpdate = true;
+        }
+      } catch {}
+      prevInstanceHighlightRef.current = null;
+      if (selectionMarkerRef.current) selectionMarkerRef.current.visible = false;
+      setSelectedItems([]);
+      updateSelectedProperties(null);
+      return;
+    }
+
+    if (terms.length === 0) {
+      console.warn('AI selection command did not include usable filters', command);
+      return;
+    }
+
+    const requestId = ++aiSelectionSeqRef.current;
+    const entries: Array<{ model: any; modelId: string; allIds: number[]; matched: Set<number> }> = [];
+    const chunkSize = 60;
+
+    for (const model of fragments.list.values()) {
+      const modelId: string = typeof model?.modelId === 'string' ? model.modelId : '';
+      if (modelIds.size && !modelIds.has(modelId)) {
+        continue;
+      }
+
+      let localIds: number[] = [];
+      try {
+        const retrieved = await model.getLocalIds();
+        if (Array.isArray(retrieved)) localIds = retrieved.slice();
+        else if (retrieved && typeof (retrieved as any)[Symbol.iterator] === 'function') {
+          localIds = Array.from(retrieved as Iterable<number>);
+        }
+      } catch (err) {
+        console.warn('Failed to fetch local IDs for model', modelId, err);
+      }
+
+      const entry = { model, modelId, allIds: localIds, matched: new Set<number>() };
+      entries.push(entry);
+
+      if (!localIds.length) continue;
+
+      for (let offset = 0; offset < localIds.length; offset += chunkSize) {
+        if (requestId !== aiSelectionSeqRef.current) return;
+        const chunk = localIds.slice(offset, offset + chunkSize);
+        let batch: any[] = [];
+        try {
+          batch = await model.getItemsData(chunk);
+        } catch (err) {
+          console.warn('Failed to retrieve property batch for AI selection', err);
+          continue;
+        }
+        chunk.forEach((localId, idx) => {
+          const itemData = batch?.[idx];
+          if (!itemData) return;
+          let rows: PropertyRow[] = [];
+          try {
+            rows = buildPropertyData(itemData).rows;
+          } catch (err) {
+            console.warn('Failed to build property rows for AI selection', err);
+          }
+          const rowSearches = rows.map((row) => row.searchText);
+          const flattened = stringifyLimited(itemData, 6000).toLowerCase();
+          const termMatched = terms.every((term) => {
+            if (term.type === 'text') {
+              return rowSearches.some((entryText) => entryText.includes(term.value)) || flattened.includes(term.value);
+            }
+            const aliases = FILTER_KEY_ALIASES[term.key] ?? [term.key];
+            const rowsMatch = rowSearches.some((entryText) => aliases.some((alias) => entryText.includes(alias)) && entryText.includes(term.value));
+            if (rowsMatch) return true;
+            return aliases.some((alias) => flattened.includes(alias) && flattened.includes(term.value));
+          });
+          if (termMatched) {
+            entry.matched.add(localId);
+          }
+        });
+      }
+    }
+
+    if (requestId !== aiSelectionSeqRef.current) return;
+
+    const matches = entries.filter((entry) => entry.matched.size > 0);
+    if (!matches.length) {
+      console.info('AI selection produced no matches for command', command);
+      return;
+    }
+
+    try {
+      const prev = prevInstanceHighlightRef.current;
+      if (prev && prev.mesh && prev.mesh.instanceColor) {
+        const white = new THREE.Color(1, 1, 1);
+        prev.mesh.setColorAt(prev.index, white);
+        prev.mesh.instanceColor.needsUpdate = true;
+      }
+    } catch {}
+    prevInstanceHighlightRef.current = null;
+    if (selectionMarkerRef.current) selectionMarkerRef.current.visible = false;
+
+    if (hider) {
+      try {
+        await hider.set(true);
+      } catch (err) {
+        console.warn('Failed to reset hidden state before AI selection', err);
+      }
+    }
+
+    if (highlighter) {
+      try { highlighter.clear?.(); } catch {}
+      const color = isolate ? 0xffa640 : 0x66ccff;
+      for (const entry of matches) {
+        const ids = Array.from(entry.matched);
+        if (!ids.length) continue;
+        try {
+          if (typeof highlighter.highlightById === 'function') {
+            await highlighter.highlightById(entry.model, ids, color);
+          } else if (typeof highlighter.highlightByID === 'function') {
+            await highlighter.highlightByID(entry.model, ids, color);
+          } else if (typeof highlighter.add === 'function') {
+            highlighter.add(entry.model, ids, color);
+          }
+        } catch (err) {
+          console.warn('Failed to apply AI highlight for model', entry.modelId, err);
+        }
+      }
+    }
+
+    if (isolate && hider) {
+      const hideMap: Record<string, Set<number>> = {};
+      for (const entry of entries) {
+        if (!entry.allIds.length) continue;
+        if (entry.matched.size === entry.allIds.length) continue;
+        const hiddenIds = entry.allIds.filter((id) => !entry.matched.has(id));
+        if (hiddenIds.length) {
+          hideMap[entry.modelId] = new Set(hiddenIds);
+        }
+      }
+      if (Object.keys(hideMap).length) {
+        try {
+          await hider.set(false, hideMap);
+        } catch (err) {
+          console.warn('Failed to isolate AI-selected elements', err);
+        }
+      }
+    }
+
+    const selectionList = matches.flatMap((entry) => Array.from(entry.matched).map((localId) => ({ modelId: entry.modelId, localId })));
+    setSelectedItems(selectionList);
+    handleExplorerOpen();
+
+    try {
+      const primary = matches[0];
+      const firstId = Array.from(primary.matched)[0];
+      if (firstId !== undefined) {
+        const [data] = await primary.model.getItemsData([firstId]);
+        if (requestId === aiSelectionSeqRef.current) {
+          updateSelectedProperties(data || null);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch properties for AI selection result', err);
+    }
+  }, [handleExplorerOpen, setSelectedItems, updateSelectedProperties]);
 
   const onExplorerResizePointerMove = useCallback((event: PointerEvent) => {
     if (!explorerResizingRef.current) return;
@@ -1505,10 +1772,40 @@ const App: React.FC = () => {
       <AppBar position="static">
         <Toolbar>
           <Typography variant="h6" sx={{ flex: 1 }}>BIM Viewer</Typography>
-          <Button color="inherit" onClick={handleExplorerOpen} sx={{ mr: 1 }} startIcon={<ViewListIcon />} title="Open Model Explorer">
+          <Button
+            color="inherit"
+            onClick={toggleExplorerWindow}
+            startIcon={<ViewListIcon />}
+            aria-pressed={isExplorerOpen}
+            sx={{
+              mr: 1,
+              borderRadius: 1.5,
+              backgroundColor: isExplorerOpen ? 'rgba(255,255,255,0.18)' : 'transparent',
+              transition: 'background-color 0.2s ease',
+              '&:hover': {
+                backgroundColor: isExplorerOpen ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.12)'
+              }
+            }}
+            title={isExplorerOpen ? 'Close Model Explorer' : 'Open Model Explorer'}
+          >
             Model Explorer
           </Button>
-          <Button color="inherit" onClick={openChatWindow} sx={{ mr: 1 }} startIcon={<ChatIcon />}>
+          <Button
+            color="inherit"
+            onClick={toggleChatWindow}
+            startIcon={<ChatIcon />}
+            aria-pressed={isChatOpen}
+            sx={{
+              mr: 1,
+              borderRadius: 1.5,
+              backgroundColor: isChatOpen ? 'rgba(255,255,255,0.18)' : 'transparent',
+              transition: 'background-color 0.2s ease',
+              '&:hover': {
+                backgroundColor: isChatOpen ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.12)'
+              }
+            }}
+            title={isChatOpen ? 'Close AI Assistant' : 'Open AI Assistant'}
+          >
             AI Assistant
           </Button>
           <Button color="inherit" onClick={fitToCurrentModel} disabled={!modelLoaded} sx={{ mr: 1 }}>
@@ -1741,6 +2038,7 @@ const App: React.FC = () => {
         onOpen={openChatWindow}
         onClose={closeChatWindow}
         expandSignal={chatExpandSignal}
+        onRequestSelection={handleAISelection}
       />
 
       <Menu

@@ -8,6 +8,63 @@ import { GoogleGenerativeAI, Content } from '@google/generative-ai';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY ?? '';
 
+export interface SelectionCommand {
+  action: 'select' | 'clear';
+  filter?: Record<string, any>;
+  mode?: 'highlight' | 'isolate' | 'focus';
+}
+
+const selectionGuidelines = `You can control the BIM viewer selection with a structured command.\nWhen the user explicitly asks you to select, highlight, filter, show, hide, isolate, or focus objects, append a single line at the end of your reply in this exact format:\nSELECTION: {"action":"select","filter":{...},"mode":"highlight"}\nUse "action":"clear" when the user wants to clear selections.\nChoose keys inside filter that match the model data (e.g. category, type, system, name, globalId, guid).\nOnly emit the SELECTION line when a selection action is required. Otherwise omit it entirely.`;
+
+const SELECTION_MARKER = 'SELECTION:';
+
+const extractJsonFromText = (text: string): string | null => {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let prev = '';
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (char === '"' && prev !== '\\') inString = false;
+    } else {
+      if (char === '"') {
+        inString = true;
+      } else if (char === '{') {
+        depth += 1;
+      } else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          return text.slice(start, i + 1);
+        }
+      }
+    }
+    prev = char;
+  }
+  return null;
+};
+
+const parseSelectionFromResponse = (raw: string): { cleaned: string; command: SelectionCommand | null } => {
+  if (!raw) return { cleaned: raw, command: null };
+  const index = raw.toUpperCase().lastIndexOf(SELECTION_MARKER);
+  if (index === -1) return { cleaned: raw, command: null };
+  const payload = raw.slice(index + SELECTION_MARKER.length).trim();
+  const withoutFence = payload.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+  const jsonText = extractJsonFromText(withoutFence);
+  if (!jsonText) return { cleaned: raw, command: null };
+  try {
+    const parsed = JSON.parse(jsonText) as SelectionCommand;
+    if (!parsed || typeof parsed.action !== 'string') {
+      return { cleaned: raw, command: null };
+    }
+    const cleaned = raw.slice(0, index).trimEnd();
+    return { cleaned: cleaned || raw, command: parsed };
+  } catch {
+    return { cleaned: raw, command: null };
+  }
+};
+
 const createModel = () => {
   const key = API_KEY.trim();
   if (!key) {
@@ -28,9 +85,10 @@ interface ChatWindowProps {
   onOpen: () => void;
   onClose: () => void;
   expandSignal: number;
+  onRequestSelection?: (command: SelectionCommand) => void;
 }
 
-const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOpen, onClose, expandSignal }) => {
+const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOpen, onClose, expandSignal, onRequestSelection }) => {
   const [isMinimized, setIsMinimized] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     { role: 'system', text: 'Hello! I am your BIM assistant. Ask me anything about the loaded models.' }
@@ -131,7 +189,11 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOp
         {
           role: 'user',
           parts: [{
-            text: `Based on the following model data, please answer the user's question.
+            text: `You are a helpful BIM assistant who can describe models and help users explore geometry.
+Follow these instructions carefully:
+- Always provide clear, concise answers grounded in the supplied model data.
+- ${selectionGuidelines}
+Based on the following model data, please answer the user's question.
 ---
 MODEL DATA:
 ${modelContext}
@@ -145,10 +207,19 @@ ${question}`
       // 3. Call Gemini API
       const result = await model.generateContent({ contents });
       const response = result.response;
-      const text = response.text();
+      const rawText = response.text();
+      const { cleaned, command } = parseSelectionFromResponse(rawText);
 
-      const modelMessage: Message = { role: 'model', text };
+      const modelMessage: Message = { role: 'model', text: cleaned };
       setMessages(prev => [...prev, modelMessage]);
+
+      if (command && typeof onRequestSelection === 'function') {
+        try {
+          onRequestSelection(command);
+        } catch (err) {
+          console.error('Failed to handle AI selection command', err);
+        }
+      }
 
     } catch (error) {
       console.error('Error calling Gemini API:', error);
