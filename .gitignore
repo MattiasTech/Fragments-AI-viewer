@@ -1,4 +1,8 @@
 # Dependencies and build output
+/dist
+/build
+/assets
+/*.map
 node_modules
 dist
 .vite
