@@ -5,7 +5,7 @@ import { Chat as ChatIcon, Minimize, OpenInFull, Close as CloseIcon } from '@mui
 import { GoogleGenerativeAI, Content } from '@google/generative-ai';
 
 // --- Configuration ---
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-2.5-flash-light';
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY ?? '';
 
 export interface SelectionCommand {

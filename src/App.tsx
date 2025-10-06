@@ -15,6 +15,8 @@ import IconButton from '@mui/material/IconButton';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
+import Tabs from '@mui/material/Tabs';
+import Tab from '@mui/material/Tab';
 import Collapse from '@mui/material/Collapse';
 import Draggable from 'react-draggable';
 import CloseIcon from '@mui/icons-material/Close';
@@ -45,6 +47,13 @@ type PropertyNode = {
   children: PropertyNode[];
   searchText: string;
 };
+
+type PrimaryProperty = {
+  label: string;
+  value: string;
+};
+
+type PropertyTabId = 'summary' | 'identity' | 'propertySets' | 'quantitySets' | 'all';
 
 type ItemsDataTableData = {
   Name: string;
@@ -340,6 +349,55 @@ const TOP_LEVEL_LABELS: Record<string, string> = {
 const IGNORED_TOP_LEVEL_KEYS = new Set<string>(['modelIdMap']);
 const sanitizeKey = (value: string) => value.replace(/[^a-z0-9]+/gi, '-').replace(/-{2,}/g, '-').replace(/(^-|-$)/g, '').toLowerCase();
 
+const IGNORED_PRIMARY_LABELS = new Set([
+  'name',
+  'nome',
+  'guid',
+  'globalid',
+  'expressid',
+  'express id',
+  'localid',
+  'local id',
+  'category',
+  'type',
+  'description',
+]);
+
+const collectPrimaryPropertiesFromTree = (nodes: PropertyNode[] | undefined): PrimaryProperty[] => {
+  const result: PrimaryProperty[] = [];
+  if (!nodes || !nodes.length) return result;
+
+  const visit = (node: PropertyNode) => {
+    if (!node) return;
+    const label = (node.label ?? '').trim();
+    const value = (node.value ?? '').toString().trim();
+    const normalizedLabel = label.toLowerCase();
+    if (value && !IGNORED_PRIMARY_LABELS.has(normalizedLabel)) {
+      const shortLabel = label.split('/').map((entry) => entry.trim()).filter(Boolean).pop() ?? label;
+      result.push({ label: shortLabel, value });
+      return;
+    }
+    if (node.children && node.children.length) {
+      for (const child of node.children) {
+        visit(child);
+      }
+    }
+  };
+
+  for (const node of nodes) {
+    visit(node);
+  }
+
+  const seen = new Set<string>();
+  const unique = result.filter((prop) => {
+    const key = `${prop.label.toLowerCase()}|${prop.value}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return unique.slice(0, 40);
+};
+
 const readName = (value: any): string | undefined => {
   if (!value || typeof value !== 'object') return undefined;
   const primary = typeof value.Name === 'string' ? value.Name : undefined;
@@ -497,11 +555,14 @@ const App: React.FC = () => {
   const itemsDataContainerRef = useRef<HTMLDivElement | null>(null);
   const itemsDataElementRef = useRef<HTMLElement | null>(null);
   const updateItemsDataRef = useRef<ReturnType<typeof BUIC.tables.itemsData>[1] | null>(null);
+  const lastItemsDataContainerRef = useRef<HTMLDivElement | null>(null);
   const hiderRef = useRef<OBC.Hider | null>(null);
   const selectedRef = useRef<Selection[]>([]);
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number } | null>(null);
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
   const [propertySearch, setPropertySearch] = useState('');
+  const [primaryProperties, setPrimaryProperties] = useState<PrimaryProperty[]>([]);
+  const [selectedPropertyTab, setSelectedPropertyTab] = useState<PropertyTabId>('summary');
   const [isModelsSectionCollapsed, setIsModelsSectionCollapsed] = useState(false);
   const [isPropertiesSectionCollapsed, setIsPropertiesSectionCollapsed] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -516,11 +577,121 @@ const App: React.FC = () => {
     return propertyRows.filter((row) => row.searchText.includes(term)).slice(0, 50);
   }, [propertySearch, propertyRows]);
 
+  const propertyTabContent = useMemo(() => {
+    const identityRoots = new Set([
+      'attributes',
+      'type',
+      'classification',
+      'systems',
+      'materials',
+      'identity',
+      'general',
+      'metadata',
+    ]);
+    const propertySetsKeywords = ['property sets', 'psets'];
+    const quantityKeywords = ['quantity sets', 'qsets', 'quantities'];
+
+    const propertySetsRows: PropertyRow[] = [];
+    const quantityRows: PropertyRow[] = [];
+    const identityRows: PropertyRow[] = [];
+
+    propertyRows.forEach((row) => {
+      const lowerLabel = row.label.toLowerCase();
+      const top = row.label.split(' / ')[0]?.trim().toLowerCase() ?? '';
+      if (propertySetsKeywords.some((keyword) => lowerLabel.startsWith(keyword))) {
+        propertySetsRows.push(row);
+        return;
+      }
+      if (quantityKeywords.some((keyword) => lowerLabel.startsWith(keyword))) {
+        quantityRows.push(row);
+        return;
+      }
+      if (identityRoots.has(top)) {
+        identityRows.push(row);
+      }
+    });
+
+    return {
+      summary: primaryProperties,
+      identityRows,
+      propertySetsRows,
+      quantityRows,
+      allRows: propertyRows,
+    };
+  }, [propertyRows, primaryProperties]);
+
+  const {
+    summary: summaryProperties,
+    identityRows,
+    propertySetsRows,
+    quantityRows,
+    allRows,
+  } = propertyTabContent;
+
+  const renderPropertyRows = useCallback(
+    (rows: PropertyRow[], emptyMessage: string) => {
+      if (!rows.length) {
+        return (
+          <Paper variant="outlined" sx={{ p: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              {emptyMessage}
+            </Typography>
+          </Paper>
+        );
+      }
+
+      return (
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 1,
+            maxHeight: 240,
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 0.75,
+          }}
+        >
+          {rows.map((row) => (
+            <Box key={row.path} sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {row.label}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {row.value ? row.value : '—'}
+              </Typography>
+            </Box>
+          ))}
+        </Paper>
+      );
+    },
+    []
+  );
+
+  const detachItemsDataListener = useCallback(
+    (table: (BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void }) | null | undefined) => {
+      if (!table?.__aiDataHandler) return;
+      table.removeEventListener('datacomputed', table.__aiDataHandler);
+      delete table.__aiDataHandler;
+    },
+    []
+  );
+
   const updateSelectedProperties = useCallback((data: Record<string, any> | null) => {
     const normalized = data ?? null;
     setProperties(normalized);
-    const { rows } = buildPropertyData(normalized);
+    const { rows, tree } = buildPropertyData(normalized);
     setPropertyRows(rows);
+
+    try {
+      const primary = collectPrimaryPropertiesFromTree(tree);
+      setPrimaryProperties(primary);
+    } catch (err) {
+      console.warn('Failed to derive primary properties for selection', err);
+      setPrimaryProperties([]);
+    }
+
+    setSelectedPropertyTab('summary');
   }, []);
 
   const openChatWindow = useCallback(() => {
@@ -801,6 +972,13 @@ const App: React.FC = () => {
       }
     }
 
+    if (itemsDataContainerRef.current !== lastItemsDataContainerRef.current) {
+      detachItemsDataListener(itemsDataElementRef.current as BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void });
+      itemsDataElementRef.current = null;
+      updateItemsDataRef.current = null;
+      lastItemsDataContainerRef.current = itemsDataContainerRef.current;
+    }
+
     ensureChild(itemsDataContainerRef.current, itemsDataElementRef, () => {
       const [element, update] = BUIC.tables.itemsData({
         components,
@@ -844,14 +1022,10 @@ const App: React.FC = () => {
     }
 
     return () => {
-      const table = itemsDataElementRef.current as (BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void }) | null;
-      if (table?.__aiDataHandler) {
-        table.removeEventListener('datacomputed', table.__aiDataHandler);
-        delete table.__aiDataHandler;
-      }
+      detachItemsDataListener(itemsDataElementRef.current as BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void });
     };
 
-  }, [componentsReady, isExplorerOpen, propertySearch]);
+  }, [componentsReady, detachItemsDataListener, isExplorerOpen, propertySearch]);
 
   useEffect(() => {
     if (!componentsReady) return;
@@ -1581,6 +1755,10 @@ const App: React.FC = () => {
     }
   }, [setContextMenu]);
 
+  const handleContextMenuClose = useCallback(() => {
+    setContextMenu(null);
+  }, [setContextMenu]);
+
   // Simple picking to show properties + add a 3D selection marker
   useEffect(() => {
     const container = viewerRef.current; const world = worldRef.current;
@@ -1938,69 +2116,209 @@ const App: React.FC = () => {
                     </IconButton>
                   </Box>
                   <Collapse in={!isPropertiesSectionCollapsed} timeout="auto">
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                      <TextField
-                        size="small"
-                        fullWidth
-                        value={propertySearch}
-                        onChange={(event) => setPropertySearch(event.target.value)}
-                        placeholder="Search properties…"
-                        disabled={!componentsReady}
-                      />
-                    </Box>
-                    {propertySearch.trim() && (
-                      <Paper
-                        variant="outlined"
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, minHeight: 0 }}>
+                      <Tabs
+                        value={selectedPropertyTab}
+                        onChange={(_, value) => setSelectedPropertyTab(value as PropertyTabId)}
+                        variant="scrollable"
+                        allowScrollButtonsMobile
                         sx={{
-                          mb: 1,
-                          maxHeight: 160,
-                          overflowY: 'auto',
-                          p: 1,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 0.75,
+                          minHeight: 'auto',
+                          '.MuiTabs-flexContainer': {
+                            gap: 0.5,
+                          },
+                          '.MuiTab-root': {
+                            minHeight: 'auto',
+                            py: 0.75,
+                          },
                         }}
                       >
-                        {matchedPropertyRows.length === 0 ? (
-                          <Typography variant="body2" color="text.secondary">
-                            No properties matched “{propertySearch.trim()}”.
-                          </Typography>
+                        <Tab value="summary" label={`Summary (${summaryProperties.length})`} />
+                        <Tab value="identity" label={`Identity (${identityRows.length})`} />
+                        <Tab value="propertySets" label={`Property Sets (${propertySetsRows.length})`} />
+                        <Tab value="quantitySets" label={`Quantity Sets (${quantityRows.length})`} />
+                        <Tab value="all" label={`All (${allRows.length})`} />
+                      </Tabs>
+
+                      <Box
+                        role="tabpanel"
+                        hidden={selectedPropertyTab !== 'summary'}
+                        sx={{
+                          display: selectedPropertyTab === 'summary' ? 'flex' : 'none',
+                          flexDirection: 'column',
+                          gap: 1,
+                        }}
+                      >
+                        {summaryProperties.length ? (
+                          <Paper
+                            variant="outlined"
+                            sx={{
+                              p: 1,
+                              maxHeight: 220,
+                              overflowY: 'auto',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 0.75,
+                            }}
+                          >
+                            {summaryProperties.map((property) => (
+                              <Box
+                                key={`${property.label}-${property.value}`}
+                                sx={{ display: 'flex', justifyContent: 'space-between', gap: 1 }}
+                              >
+                                <Typography variant="body2" sx={{ fontWeight: 700, pr: 1 }}>
+                                  {property.label}
+                                </Typography>
+                                <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'right', flex: 1 }}>
+                                  {property.value}
+                                </Typography>
+                              </Box>
+                            ))}
+                          </Paper>
                         ) : (
-                          matchedPropertyRows.map((row) => (
-                            <Box key={row.path} sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
-                              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                {row.label}
-                              </Typography>
+                          <Paper variant="outlined" sx={{ p: 1 }}>
+                            <Typography variant="body2" color="text.secondary">
+                              Primary property values will appear here once an item is selected.
+                            </Typography>
+                          </Paper>
+                        )}
+                      </Box>
+
+                      <Box
+                        role="tabpanel"
+                        hidden={selectedPropertyTab !== 'identity'}
+                        sx={{
+                          display: selectedPropertyTab === 'identity' ? 'flex' : 'none',
+                          flexDirection: 'column',
+                          gap: 1,
+                        }}
+                      >
+                        {renderPropertyRows(
+                          identityRows,
+                          'Identity values will appear here once an item is selected.'
+                        )}
+                      </Box>
+
+                      <Box
+                        role="tabpanel"
+                        hidden={selectedPropertyTab !== 'propertySets'}
+                        sx={{
+                          display: selectedPropertyTab === 'propertySets' ? 'flex' : 'none',
+                          flexDirection: 'column',
+                          gap: 1,
+                        }}
+                      >
+                        {renderPropertyRows(
+                          propertySetsRows,
+                          'Property sets will appear here once they are available for the selected element.'
+                        )}
+                      </Box>
+
+                      <Box
+                        role="tabpanel"
+                        hidden={selectedPropertyTab !== 'quantitySets'}
+                        sx={{
+                          display: selectedPropertyTab === 'quantitySets' ? 'flex' : 'none',
+                          flexDirection: 'column',
+                          gap: 1,
+                        }}
+                      >
+                        {renderPropertyRows(
+                          quantityRows,
+                          'Quantity sets will appear here once they are available for the selected element.'
+                        )}
+                      </Box>
+
+                      <Box
+                        role="tabpanel"
+                        hidden={selectedPropertyTab !== 'all'}
+                        sx={{
+                          display: selectedPropertyTab === 'all' ? 'flex' : 'none',
+                          flexDirection: 'column',
+                          gap: 1,
+                          minHeight: 0,
+                        }}
+                      >
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <TextField
+                            size="small"
+                            fullWidth
+                            value={propertySearch}
+                            onChange={(event) => setPropertySearch(event.target.value)}
+                            placeholder="Search properties…"
+                            disabled={!componentsReady}
+                          />
+                        </Box>
+                        {propertySearch.trim() && (
+                          <Paper
+                            variant="outlined"
+                            sx={{
+                              maxHeight: 160,
+                              overflowY: 'auto',
+                              p: 1,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 0.75,
+                            }}
+                          >
+                            {matchedPropertyRows.length === 0 ? (
                               <Typography variant="body2" color="text.secondary">
-                                {row.value ? row.value : '—'}
+                                No properties matched “{propertySearch.trim()}”.
+                              </Typography>
+                            ) : (
+                              matchedPropertyRows.map((row) => (
+                                <Box key={row.path} sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                    {row.label}
+                                  </Typography>
+                                  <Typography variant="body2" color="text.secondary">
+                                    {row.value ? row.value : '—'}
+                                  </Typography>
+                                </Box>
+                              ))
+                            )}
+                          </Paper>
+                        )}
+                        <Box
+                          ref={itemsDataContainerRef}
+                          sx={{
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 1,
+                            minHeight: 180,
+                            maxHeight: 300,
+                            flex: 1,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            overflow: 'hidden',
+                            position: 'relative',
+                          }}
+                        >
+                          {!componentsReady ? (
+                            <Box sx={{ p: 2 }}>
+                              <Typography variant="body2" color="text.secondary">
+                                Viewer is initializing…
                               </Typography>
                             </Box>
-                          ))
-                        )}
-                      </Paper>
-                    )}
-                    <Box
-                      ref={itemsDataContainerRef}
-                      sx={{
-                        border: '1px solid',
-                        borderColor: 'divider',
-                        borderRadius: 1,
-                        minHeight: 200,
-                        maxHeight: 320,
-                        flex: 1,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        overflow: 'hidden',
-                        position: 'relative',
-                      }}
-                    >
-                      {!componentsReady && (
-                        <Box sx={{ p: 2 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            Viewer is initializing…
-                          </Typography>
+                          ) : !properties ? (
+                            <Box
+                              sx={{
+                                position: 'absolute',
+                                inset: 0,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                px: 2,
+                                textAlign: 'center',
+                              }}
+                            >
+                              <Typography variant="body2" color="text.secondary">
+                                Select an element in the viewer to see its full property structure.
+                              </Typography>
+                            </Box>
+                          ) : null}
                         </Box>
-                      )}
+                      </Box>
                     </Box>
                   </Collapse>
                 </Box>
@@ -2043,9 +2361,13 @@ const App: React.FC = () => {
 
       <Menu
         open={Boolean(contextMenu)}
-        onClose={() => setContextMenu(null)}
+        onClose={handleContextMenuClose}
         anchorReference="anchorPosition"
         anchorPosition={contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined}
+        disableAutoFocus
+        disableAutoFocusItem
+        disableEnforceFocus
+        MenuListProps={{ autoFocusItem: false }}
       >
   <MenuItem onClick={hideSelected} disabled={selectedItems.length === 0}>
           Hide selected element
