@@ -387,6 +387,156 @@ const TOP_LEVEL_LABELS: Record<string, string> = {
 const IGNORED_TOP_LEVEL_KEYS = new Set<string>(['modelIdMap']);
 const sanitizeKey = (value: string) => value.replace(/[^a-z0-9]+/gi, '-').replace(/-{2,}/g, '-').replace(/(^-|-$)/g, '').toLowerCase();
 
+const IFC_PROPERTY_COLLECTION_KEYS = ['HasProperties', 'hasProperties', 'Properties', 'properties'] as const;
+
+const isIfcPropertySet = (value: any): boolean => {
+  if (!value || typeof value !== 'object') return false;
+  const typeField = typeof value.type === 'string' ? value.type : typeof value.Type === 'string' ? value.Type : undefined;
+  if (typeField && typeField.toUpperCase() === 'IFCPROPERTYSET') return true;
+  return IFC_PROPERTY_COLLECTION_KEYS.some((key) => Array.isArray((value as any)[key]));
+};
+
+const isIfcPropertySingleValue = (value: any): boolean => {
+  if (!value || typeof value !== 'object') return false;
+  const typeField = typeof value.type === 'string' ? value.type : typeof value.Type === 'string' ? value.Type : undefined;
+  if (typeField && typeField.toUpperCase() === 'IFCPROPERTYSINGLEVALUE') return true;
+  return 'NominalValue' in value || 'nominalValue' in value;
+};
+
+const extractSingleValueText = (property: any): string => {
+  if (!property || typeof property !== 'object') return formatPrimitive(property);
+  const candidateKeys = [
+    'NominalValue',
+    'nominalValue',
+    'Value',
+    'value',
+    'DataValue',
+    'dataValue',
+    'LengthValue',
+    'AreaValue',
+    'CountValue',
+    'VolumeValue',
+    'NumberValue',
+    'BooleanValue',
+    'LogicalValue',
+    'TextValue',
+    'IntegerValue',
+    'UpperBoundValue',
+    'LowerBoundValue',
+    'EnumerationValues',
+    'ListValues',
+  ];
+
+  for (const key of candidateKeys) {
+    if (!(key in property)) continue;
+    const entry = (property as any)[key];
+    if (entry == null) continue;
+    if (Array.isArray(entry)) {
+      const joined = entry.map((item) => extractNominalValue(item)).filter(Boolean).join(', ');
+      if (joined) return joined;
+      continue;
+    }
+    const resolved = extractNominalValue(entry);
+    if (resolved) return resolved;
+  }
+
+  for (const [key, value] of Object.entries(property as Record<string, any>)) {
+    if ((typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') && key.toLowerCase().includes('value')) {
+      const formatted = formatPrimitive(value);
+      if (formatted) return formatted;
+    }
+  }
+
+  return '';
+};
+
+const extractPropertySetRows = (pset: Record<string, any>, rawName: string, uniquePsetKey: string): PropertyRow[] => {
+  const collections = IFC_PROPERTY_COLLECTION_KEYS
+    .map((key) => (Array.isArray((pset as any)[key]) ? ((pset as any)[key] as any[]) : null))
+    .filter((collection): collection is any[] => Boolean(collection));
+
+  if (!collections.length) return [];
+
+  const friendlyPsetName = prettifyLabel(rawName) || rawName;
+  const rows: PropertyRow[] = [];
+  const propertyCounters = new Map<string, number>();
+
+  collections.flat().forEach((property, index) => {
+    if (!property || typeof property !== 'object') return;
+    if (!isIfcPropertySingleValue(property)) return;
+
+    const nameCandidate = readName(property) ?? (typeof property.Name === 'string' ? property.Name : undefined) ?? (typeof property.PropertyName === 'string' ? property.PropertyName : undefined);
+    const fallbackName = `Property ${index + 1}`;
+    const rawPropertyName = nameCandidate && nameCandidate.trim().length ? nameCandidate.trim() : fallbackName;
+    const friendlyPropertyName = prettifyLabel(rawPropertyName) || rawPropertyName;
+    const valueText = extractSingleValueText(property);
+
+    const propertyKeyBase = sanitizeKey(rawPropertyName) || 'property';
+    const occurrence = (propertyCounters.get(propertyKeyBase) ?? 0) + 1;
+    propertyCounters.set(propertyKeyBase, occurrence);
+    const uniquePropertyKey = `${propertyKeyBase}-${occurrence}`;
+
+    const label = `Property Sets / ${friendlyPsetName} / ${friendlyPropertyName}`;
+    const searchPieces = [label.toLowerCase()];
+    if (valueText) {
+      searchPieces.push(valueText.toLowerCase());
+    }
+
+    rows.push({
+      label,
+      value: valueText || '',
+      path: `property-sets/${uniquePsetKey}/${uniquePropertyKey}`,
+      searchText: searchPieces.join(' ').trim(),
+    });
+  });
+
+  return rows;
+};
+
+const collectIfcPropertySetRows = (root: any): PropertyRow[] => {
+  if (!root || typeof root !== 'object') return [];
+
+  const rows: PropertyRow[] = [];
+  const visited = new WeakSet<object>();
+  const psetCounters = new Map<string, number>();
+
+  const traverse = (value: any) => {
+    if (!value || typeof value !== 'object') return;
+    if (visited.has(value)) return;
+    visited.add(value);
+
+    if (Array.isArray(value)) {
+      value.forEach(traverse);
+      return;
+    }
+
+    if (isIfcPropertySet(value)) {
+      const rawNameCandidate =
+        readName(value) ??
+        (typeof (value as any).GlobalId === 'string' ? (value as any).GlobalId : undefined) ??
+        (typeof (value as any).GlobalID === 'string' ? (value as any).GlobalID : undefined) ??
+        (typeof (value as any).id === 'string' ? (value as any).id : undefined) ??
+        'Property Set';
+
+      const rawName = typeof rawNameCandidate === 'string' ? rawNameCandidate.trim() : String(rawNameCandidate ?? '');
+      const effectiveName = rawName.length ? rawName : 'Property Set';
+      const psetKeyBase = sanitizeKey(effectiveName) || 'property-set';
+      const occurrence = (psetCounters.get(psetKeyBase) ?? 0) + 1;
+      psetCounters.set(psetKeyBase, occurrence);
+      const uniquePsetKey = `${psetKeyBase}-${occurrence}`;
+
+      rows.push(...extractPropertySetRows(value as Record<string, any>, effectiveName, uniquePsetKey));
+    }
+
+    Object.values(value as Record<string, any>).forEach((child) => {
+      if (child && typeof child === 'object') traverse(child);
+    });
+  };
+
+  traverse(root);
+  return rows;
+};
+
 const FAVORITES_STORAGE_KEY = 'fragmentsViewer.favoritePropertyPaths';
 const MAX_DISPLAY_PROPERTY_ROWS = 200;
 const MAX_SEARCH_RESULTS = 200;
@@ -515,6 +665,37 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
     const friendly = TOP_LEVEL_LABELS[key] ?? key;
     const node = visit(value, [friendly], [key]);
     if (node) tree.push(node);
+  }
+
+  if (rows.length) {
+    const filtered = rows.filter((row) => {
+      const lower = row.label.toLowerCase();
+      if (!lower.startsWith('property sets /')) return true;
+      if (lower.includes('/ has properties')) return false;
+      if (lower.includes('/ nominal value')) return false;
+      return true;
+    });
+    if (filtered.length !== rows.length) {
+      rows.splice(0, rows.length, ...filtered);
+    }
+  }
+
+  const propertySetRows = collectIfcPropertySetRows(item);
+  if (propertySetRows.length) {
+    const existingByPath = new Map<string, PropertyRow>();
+    rows.forEach((row) => existingByPath.set(row.path, row));
+
+    propertySetRows.forEach((psetRow) => {
+      const existing = existingByPath.get(psetRow.path);
+      if (existing) {
+        existing.label = psetRow.label;
+        existing.value = psetRow.value;
+        existing.searchText = psetRow.searchText;
+      } else {
+        rows.push(psetRow);
+        existingByPath.set(psetRow.path, psetRow);
+      }
+    });
   }
 
   return { rows, tree };
