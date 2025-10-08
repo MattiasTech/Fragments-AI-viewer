@@ -18,6 +18,17 @@ import TextField from '@mui/material/TextField';
 import Tabs from '@mui/material/Tabs';
 import Tab from '@mui/material/Tab';
 import Collapse from '@mui/material/Collapse';
+import Tooltip from '@mui/material/Tooltip';
+import Dialog from '@mui/material/Dialog';
+import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogActions from '@mui/material/DialogActions';
+import FormControl from '@mui/material/FormControl';
+import FormLabel from '@mui/material/FormLabel';
+import RadioGroup from '@mui/material/RadioGroup';
+import FormControlLabel from '@mui/material/FormControlLabel';
+import Radio from '@mui/material/Radio';
+import Alert from '@mui/material/Alert';
 import Draggable from 'react-draggable';
 import CloseIcon from '@mui/icons-material/Close';
 import MinimizeIcon from '@mui/icons-material/Minimize';
@@ -26,6 +37,9 @@ import ViewListIcon from '@mui/icons-material/ViewList';
 import ChatIcon from '@mui/icons-material/Chat';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import StarIcon from '@mui/icons-material/Star';
+import StarBorderIcon from '@mui/icons-material/StarBorder';
+import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import * as THREE from 'three';
 import Stats from 'stats.js';
 import ChatWindow, { SelectionCommand } from './ChatWindow';
@@ -48,12 +62,7 @@ type PropertyNode = {
   searchText: string;
 };
 
-type PrimaryProperty = {
-  label: string;
-  value: string;
-};
-
-type PropertyTabId = 'summary' | 'identity' | 'propertySets' | 'quantitySets' | 'all';
+type PropertyTabId = 'favorites' | 'all';
 
 type ItemsDataTableData = {
   Name: string;
@@ -179,6 +188,31 @@ const computeModelSummary = (modelId: string, label: string, object: THREE.Objec
   };
 };
 
+const UPPERCASE_WORDS = new Set(['ID', 'IFC', 'BIM', 'MEP', 'HVAC', 'URL', 'CAD']);
+
+const prettifyLabel = (label: string): string => {
+  if (!label) return '';
+  let text = label.replace(/[_\-]+/g, ' ');
+  text = text.replace(/([a-z\d])([A-Z])/g, '$1 $2');
+  text = text.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  text = text.replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const words = text.split(' ').map((word) => {
+    const upper = word.toUpperCase();
+    if (UPPERCASE_WORDS.has(upper)) return upper;
+    if (upper.length <= 3 && /^[A-Z]+$/.test(upper)) return upper;
+    if (/^\d+(\.\d+)?$/.test(word)) return word;
+    if (!word.length) return word;
+    return word.charAt(0).toUpperCase() + word.slice(1);
+  });
+  return words.join(' ');
+};
+
+const truncateDisplayValue = (value: string, maxLength = 200): string => {
+  if (!value) return '';
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}…`;
+};
+
 const formatPrimitive = (value: any): string => {
   if (value === null || value === undefined) return '';
   if (typeof value === 'number') {
@@ -245,8 +279,12 @@ const collectItemsDataRows = (groups: ItemsDataGroup[], prefix: string[] = []) =
   const rows: { path: string; value: string }[] = [];
   for (const group of groups) {
     if (!group || !group.data) continue;
-    const name = typeof group.data.Name === 'string' ? group.data.Name.trim() : String(group.data.Name ?? '');
-    const pathParts = name ? [...prefix, name] : [...prefix];
+    const rawName = group.data.Name;
+    let nameText = '';
+    if (typeof rawName === 'string') nameText = rawName.trim();
+    else if (rawName != null) nameText = String(rawName).trim();
+    const displayName = nameText ? prettifyLabel(nameText) || nameText : '';
+    const pathParts = displayName ? [...prefix, displayName] : [...prefix];
     const path = pathParts.filter(Boolean).join(' / ');
     const valueText = stringifyItemsDataValue(group.data.Value);
     if (path && valueText !== '') {
@@ -349,54 +387,9 @@ const TOP_LEVEL_LABELS: Record<string, string> = {
 const IGNORED_TOP_LEVEL_KEYS = new Set<string>(['modelIdMap']);
 const sanitizeKey = (value: string) => value.replace(/[^a-z0-9]+/gi, '-').replace(/-{2,}/g, '-').replace(/(^-|-$)/g, '').toLowerCase();
 
-const IGNORED_PRIMARY_LABELS = new Set([
-  'name',
-  'nome',
-  'guid',
-  'globalid',
-  'expressid',
-  'express id',
-  'localid',
-  'local id',
-  'category',
-  'type',
-  'description',
-]);
-
-const collectPrimaryPropertiesFromTree = (nodes: PropertyNode[] | undefined): PrimaryProperty[] => {
-  const result: PrimaryProperty[] = [];
-  if (!nodes || !nodes.length) return result;
-
-  const visit = (node: PropertyNode) => {
-    if (!node) return;
-    const label = (node.label ?? '').trim();
-    const value = (node.value ?? '').toString().trim();
-    const normalizedLabel = label.toLowerCase();
-    if (value && !IGNORED_PRIMARY_LABELS.has(normalizedLabel)) {
-      const shortLabel = label.split('/').map((entry) => entry.trim()).filter(Boolean).pop() ?? label;
-      result.push({ label: shortLabel, value });
-      return;
-    }
-    if (node.children && node.children.length) {
-      for (const child of node.children) {
-        visit(child);
-      }
-    }
-  };
-
-  for (const node of nodes) {
-    visit(node);
-  }
-
-  const seen = new Set<string>();
-  const unique = result.filter((prop) => {
-    const key = `${prop.label.toLowerCase()}|${prop.value}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  return unique.slice(0, 40);
-};
+const FAVORITES_STORAGE_KEY = 'fragmentsViewer.favoritePropertyPaths';
+const MAX_DISPLAY_PROPERTY_ROWS = 200;
+const MAX_SEARCH_RESULTS = 200;
 
 const readName = (value: any): string | undefined => {
   if (!value || typeof value !== 'object') return undefined;
@@ -417,9 +410,16 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
   const visit = (value: any, labelParts: string[], keyParts: string[]): PropertyNode | null => {
     if (value == null) return null;
 
-    const fullLabel = labelParts.join(' / ');
+    const displayParts = labelParts.map((part) => {
+      const trimmed = part?.trim?.() ?? part;
+      if (typeof trimmed === 'string' && trimmed.length) {
+        return prettifyLabel(trimmed) || trimmed;
+      }
+      return typeof part === 'string' ? part : String(part ?? '');
+    });
+    const fullLabel = displayParts.filter(Boolean).join(' / ');
     const idBase = keyParts.length ? keyParts.join('/') : sanitizeKey(fullLabel || 'value');
-    const label = labelParts[labelParts.length - 1] ?? 'Value';
+    const label = displayParts[displayParts.length - 1] ?? 'Value';
 
     const pushRow = (valueText?: string) => {
       const lowerLabel = fullLabel.toLowerCase();
@@ -455,9 +455,11 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
     if (Array.isArray(value)) {
       value.forEach((child, index) => {
         const childName = readName(child);
-        const childLabel = childName ?? `${label} ${index + 1}`;
-        const childKey = childName ? sanitizeKey(childName) : String(index);
-        const childNode = visit(child, [...labelParts.slice(0, -1), label, childLabel], [...keyParts, childKey]);
+        const fallbackLabel = `${label} ${index + 1}`;
+        const resolvedLabel = childName && childName.trim().length ? childName.trim() : fallbackLabel;
+        const childLabel = prettifyLabel(resolvedLabel) || resolvedLabel;
+        const childKey = childName && childName.trim().length ? sanitizeKey(childName) : String(index);
+        const childNode = visit(child, [...labelParts, childLabel], [...keyParts, childKey]);
         if (childNode) children.push(childNode);
       });
       if (children.length === 0) {
@@ -483,15 +485,17 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
         if (childVal == null) continue;
         if (entryKey === 'Name' || entryKey === 'name') continue;
         if (entryKey === 'NominalValue' || entryKey === 'nominalValue') {
-          const nominalLabel = 'NominalValue';
+          const nominalLabel = prettifyLabel('Nominal Value') || 'Nominal Value';
           const childNode = visit(childVal, [...labelParts, nominalLabel], [...keyParts, 'nominal-value']);
           if (childNode) children.push(childNode);
           continue;
         }
-        const friendly = TOP_LEVEL_LABELS[entryKey] ?? entryKey;
-        const childName = readName(childVal);
-        const nextLabelParts = childName ? [...labelParts, childName] : [...labelParts, friendly];
-        const childKeyPart = childName ? sanitizeKey(childName) : sanitizeKey(friendly);
+        const friendlyRaw = TOP_LEVEL_LABELS[entryKey] ?? entryKey;
+        const friendly = prettifyLabel(friendlyRaw) || friendlyRaw;
+        const childName = readName(childVal)?.trim();
+        const childLabel = childName && childName.length ? prettifyLabel(childName) || childName : friendly;
+        const childKeyPart = childName && childName.length ? sanitizeKey(childName) : sanitizeKey(friendlyRaw);
+        const nextLabelParts = [...labelParts, childLabel];
         const childNode = visit(childVal, nextLabelParts, [...keyParts, childKeyPart]);
         if (childNode) children.push(childNode);
       }
@@ -561,8 +565,8 @@ const App: React.FC = () => {
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number } | null>(null);
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
   const [propertySearch, setPropertySearch] = useState('');
-  const [primaryProperties, setPrimaryProperties] = useState<PrimaryProperty[]>([]);
-  const [selectedPropertyTab, setSelectedPropertyTab] = useState<PropertyTabId>('summary');
+  const [favoritePropertyPaths, setFavoritePropertyPaths] = useState<string[]>([]);
+  const [selectedPropertyTab, setSelectedPropertyTab] = useState<PropertyTabId>('favorites');
   const [isModelsSectionCollapsed, setIsModelsSectionCollapsed] = useState(false);
   const [isPropertiesSectionCollapsed, setIsPropertiesSectionCollapsed] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -570,103 +574,245 @@ const App: React.FC = () => {
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
   const [lastItemsDataTSV, setLastItemsDataTSV] = useState<string | null>(null);
   const [lastItemsDataRows, setLastItemsDataRows] = useState<{ path: string; value: string }[]>([]);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportScope, setExportScope] = useState<'selected' | 'model'>('selected');
+  const [exportModelId, setExportModelId] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(FAVORITES_STORAGE_KEY);
+      if (!stored) return;
+      const parsed = JSON.parse(stored);
+      if (!Array.isArray(parsed)) return;
+      const sanitized = parsed.filter(
+        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0
+      );
+      if (sanitized.length) {
+        setFavoritePropertyPaths(sanitized);
+      }
+    } catch (error) {
+      console.warn('Failed to restore favourites from storage', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favoritePropertyPaths));
+    } catch (error) {
+      console.warn('Failed to persist favourites to storage', error);
+    }
+  }, [favoritePropertyPaths]);
+
+  const propertySearchTerm = propertySearch.trim();
+  const hasPropertySearch = propertySearchTerm.length > 0;
 
   const matchedPropertyRows = useMemo(() => {
-    const term = propertySearch.trim().toLowerCase();
+    const term = propertySearchTerm.toLowerCase();
     if (!term) return [] as PropertyRow[];
-    return propertyRows.filter((row) => row.searchText.includes(term)).slice(0, 50);
-  }, [propertySearch, propertyRows]);
+    return propertyRows.filter((row) => row.searchText.includes(term)).slice(0, MAX_SEARCH_RESULTS);
+  }, [propertySearchTerm, propertyRows]);
 
-  const propertyTabContent = useMemo(() => {
-    const identityRoots = new Set([
-      'attributes',
-      'type',
-      'classification',
-      'systems',
-      'materials',
-      'identity',
-      'general',
-      'metadata',
-    ]);
-    const propertySetsKeywords = ['property sets', 'psets'];
-    const quantityKeywords = ['quantity sets', 'qsets', 'quantities'];
+  const propertyRowMap = useMemo(() => {
+    const map = new Map<string, PropertyRow>();
+    propertyRows.forEach((row) => map.set(row.path, row));
+    return map;
+  }, [propertyRows]);
 
-    const propertySetsRows: PropertyRow[] = [];
-    const quantityRows: PropertyRow[] = [];
-    const identityRows: PropertyRow[] = [];
+  const limitedPropertyRows = useMemo(
+    () => propertyRows.slice(0, MAX_DISPLAY_PROPERTY_ROWS),
+    [propertyRows]
+  );
 
-    propertyRows.forEach((row) => {
-      const lowerLabel = row.label.toLowerCase();
-      const top = row.label.split(' / ')[0]?.trim().toLowerCase() ?? '';
-      if (propertySetsKeywords.some((keyword) => lowerLabel.startsWith(keyword))) {
-        propertySetsRows.push(row);
-        return;
+  const truncatedPropertyCount = Math.max(propertyRows.length - limitedPropertyRows.length, 0);
+
+  const favoritePathSet = useMemo(() => new Set(favoritePropertyPaths), [favoritePropertyPaths]);
+
+  const favoriteRows = useMemo(() => {
+    if (!favoritePropertyPaths.length) return [] as PropertyRow[];
+    return favoritePropertyPaths
+      .map((path) => propertyRowMap.get(path))
+      .filter((row): row is PropertyRow => Boolean(row));
+  }, [favoritePropertyPaths, propertyRowMap]);
+
+  const missingFavoriteCount = useMemo(() => {
+    if (!favoritePropertyPaths.length) return 0;
+    let missing = 0;
+    for (const path of favoritePropertyPaths) {
+      if (!propertyRowMap.has(path)) missing += 1;
+    }
+    return missing;
+  }, [favoritePropertyPaths, propertyRowMap]);
+
+  const toggleFavoriteProperty = useCallback((path: string) => {
+    setFavoritePropertyPaths((prev) => {
+      if (prev.includes(path)) {
+        return prev.filter((entry) => entry !== path);
       }
-      if (quantityKeywords.some((keyword) => lowerLabel.startsWith(keyword))) {
-        quantityRows.push(row);
-        return;
-      }
-      if (identityRoots.has(top)) {
-        identityRows.push(row);
-      }
+      return [...prev, path];
     });
+  }, []);
 
-    return {
-      summary: primaryProperties,
-      identityRows,
-      propertySetsRows,
-      quantityRows,
-      allRows: propertyRows,
-    };
-  }, [propertyRows, primaryProperties]);
-
-  const {
-    summary: summaryProperties,
-    identityRows,
-    propertySetsRows,
-    quantityRows,
-    allRows,
-  } = propertyTabContent;
-
-  const renderPropertyRows = useCallback(
-    (rows: PropertyRow[], emptyMessage: string) => {
-      if (!rows.length) {
-        return (
-          <Paper variant="outlined" sx={{ p: 1 }}>
-            <Typography variant="body2" color="text.secondary">
-              {emptyMessage}
+  const renderPropertyRow = useCallback(
+    (row: PropertyRow) => {
+      const isFavorite = favoritePathSet.has(row.path);
+      return (
+        <Box key={row.path} sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              {row.label}
             </Typography>
-          </Paper>
-        );
+            <Tooltip title={isFavorite ? 'Remove from favourites' : 'Add to favourites'}>
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={() => toggleFavoriteProperty(row.path)}
+                  color={isFavorite ? 'primary' : 'default'}
+                >
+                  {isFavorite ? <StarIcon fontSize="small" /> : <StarBorderIcon fontSize="small" />}
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Box>
+          <Typography variant="body2" color="text.secondary">
+            {row.value ? truncateDisplayValue(row.value, 360) : '—'}
+          </Typography>
+        </Box>
+      );
+    },
+    [favoritePathSet, toggleFavoriteProperty]
+  );
+
+  useEffect(() => {
+    if (!models.length) {
+      setExportModelId('');
+      return;
+    }
+    setExportModelId((prev) => (prev && models.some((model) => model.id === prev) ? prev : models[0].id));
+  }, [models]);
+
+  const gatherModelPropertyRows = useCallback(
+    async (modelId: string): Promise<{ path: string; value: string }[]> => {
+      const fragments = fragmentsRef.current;
+      if (!fragments) return [];
+      const record = fragments.list.get(modelId);
+      if (!record) return [];
+
+      let localIds: number[] = [];
+      try {
+        const fetched = await record.getLocalIds();
+        if (Array.isArray(fetched)) localIds = fetched;
+        else if (fetched && typeof (fetched as any)[Symbol.iterator] === 'function') {
+          localIds = Array.from(fetched as Iterable<number>);
+        }
+      } catch (error) {
+        console.warn(`Failed to retrieve local IDs for model ${modelId}`, error);
+        return [];
       }
 
-      return (
-        <Paper
-          variant="outlined"
-          sx={{
-            p: 1,
-            maxHeight: 240,
-            overflowY: 'auto',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 0.75,
-          }}
-        >
-          {rows.map((row) => (
-            <Box key={row.path} sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {row.label}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                {row.value ? row.value : '—'}
-              </Typography>
-            </Box>
-          ))}
-        </Paper>
-      );
+      if (!localIds.length) return [];
+
+      const chunkSize = 32;
+      const rows: { path: string; value: string }[] = [];
+      for (let index = 0; index < localIds.length; index += chunkSize) {
+        const chunk = localIds.slice(index, index + chunkSize);
+        let batch: any[] = [];
+        try {
+          batch = await record.getItemsData(chunk);
+        } catch (error) {
+          console.warn(`Failed to fetch items data for model ${modelId} chunk starting at ${chunk[0]}`, error);
+          continue;
+        }
+        batch.forEach((data, position) => {
+          const localId = chunk[position];
+          if (!data) return;
+          try {
+            const { rows: propertyRowsForItem } = buildPropertyData(data);
+            propertyRowsForItem.forEach((propertyRow) => {
+              rows.push({
+                path: `localId:${localId} / ${propertyRow.label}`,
+                value: propertyRow.value,
+              });
+            });
+          } catch (error) {
+            console.warn(`Failed to process properties for model ${modelId} localId ${localId}`, error);
+          }
+        });
+      }
+
+      return rows;
     },
     []
   );
+
+  const buildCsvContent = useCallback((rows: { path: string; value: string }[]) => {
+    const lines: string[] = [];
+    lines.push('Path,Value');
+    rows.forEach(({ path, value }) => {
+      const safePath = path.replace(/"/g, '""');
+      const safeValue = (value ?? '').replace(/"/g, '""');
+      lines.push(`"${safePath}","${safeValue}"`);
+    });
+    return lines.join('\r\n');
+  }, []);
+
+  const handleOpenExportDialog = useCallback(() => {
+    setExportError(null);
+    setExportScope(propertyRows.length ? 'selected' : 'model');
+    if (models.length && !models.some((model) => model.id === exportModelId)) {
+      setExportModelId(models[0].id);
+    }
+    setExportDialogOpen(true);
+  }, [propertyRows.length, models, exportModelId]);
+
+  const handleCloseExportDialog = useCallback(() => {
+    if (isExporting) return;
+    setExportDialogOpen(false);
+    setExportError(null);
+  }, [isExporting]);
+
+  const handleConfirmExport = useCallback(async () => {
+    if (isExporting) return;
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      let rows: { path: string; value: string }[] = [];
+      if (exportScope === 'selected') {
+        if (!propertyRows.length) {
+          throw new Error('No properties available for the current selection.');
+        }
+        rows = propertyRows.map((row) => ({ path: row.label, value: row.value }));
+      } else {
+        if (!exportModelId) {
+          throw new Error('Select a model to export.');
+        }
+        rows = await gatherModelPropertyRows(exportModelId);
+        if (!rows.length) {
+          throw new Error('No properties were found for the chosen model.');
+        }
+      }
+
+      const csv = buildCsvContent(rows);
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const scopeLabel = exportScope === 'selected' ? 'selection' : `model-${exportModelId}`;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.href = url;
+      link.download = `fragment-properties-${scopeLabel}-${timestamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setExportDialogOpen(false);
+    } catch (error) {
+      console.warn('Failed to export properties', error);
+      setExportError((error as Error).message ?? 'Failed to export properties.');
+    } finally {
+      setIsExporting(false);
+    }
+  }, [buildCsvContent, exportModelId, exportScope, gatherModelPropertyRows, isExporting, propertyRows]);
 
   const detachItemsDataListener = useCallback(
     (table: (BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void }) | null | undefined) => {
@@ -677,22 +823,16 @@ const App: React.FC = () => {
     []
   );
 
-  const updateSelectedProperties = useCallback((data: Record<string, any> | null) => {
-    const normalized = data ?? null;
-    setProperties(normalized);
-    const { rows, tree } = buildPropertyData(normalized);
-    setPropertyRows(rows);
-
-    try {
-      const primary = collectPrimaryPropertiesFromTree(tree);
-      setPrimaryProperties(primary);
-    } catch (err) {
-      console.warn('Failed to derive primary properties for selection', err);
-      setPrimaryProperties([]);
-    }
-
-    setSelectedPropertyTab('summary');
-  }, []);
+  const updateSelectedProperties = useCallback(
+    (data: Record<string, any> | null) => {
+      const normalized = data ?? null;
+      setProperties(normalized);
+      const { rows } = buildPropertyData(normalized);
+      setPropertyRows(rows);
+      setSelectedPropertyTab(favoritePropertyPaths.length ? 'favorites' : 'all');
+    },
+    [favoritePropertyPaths.length]
+  );
 
   const openChatWindow = useCallback(() => {
     setIsChatOpen((prev) => {
@@ -2133,23 +2273,20 @@ const App: React.FC = () => {
                           },
                         }}
                       >
-                        <Tab value="summary" label={`Summary (${summaryProperties.length})`} />
-                        <Tab value="identity" label={`Identity (${identityRows.length})`} />
-                        <Tab value="propertySets" label={`Property Sets (${propertySetsRows.length})`} />
-                        <Tab value="quantitySets" label={`Quantity Sets (${quantityRows.length})`} />
-                        <Tab value="all" label={`All (${allRows.length})`} />
+                        <Tab value="favorites" label={`Favourites (${favoriteRows.length})`} />
+                        <Tab value="all" label={`All (${propertyRows.length})`} />
                       </Tabs>
 
                       <Box
                         role="tabpanel"
-                        hidden={selectedPropertyTab !== 'summary'}
+                        hidden={selectedPropertyTab !== 'favorites'}
                         sx={{
-                          display: selectedPropertyTab === 'summary' ? 'flex' : 'none',
+                          display: selectedPropertyTab === 'favorites' ? 'flex' : 'none',
                           flexDirection: 'column',
                           gap: 1,
                         }}
                       >
-                        {summaryProperties.length ? (
+                        {favoriteRows.length ? (
                           <Paper
                             variant="outlined"
                             sx={{
@@ -2161,71 +2298,23 @@ const App: React.FC = () => {
                               gap: 0.75,
                             }}
                           >
-                            {summaryProperties.map((property) => (
-                              <Box
-                                key={`${property.label}-${property.value}`}
-                                sx={{ display: 'flex', justifyContent: 'space-between', gap: 1 }}
-                              >
-                                <Typography variant="body2" sx={{ fontWeight: 700, pr: 1 }}>
-                                  {property.label}
-                                </Typography>
-                                <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'right', flex: 1 }}>
-                                  {property.value}
-                                </Typography>
-                              </Box>
-                            ))}
+                            {favoriteRows.map(renderPropertyRow)}
                           </Paper>
                         ) : (
                           <Paper variant="outlined" sx={{ p: 1 }}>
                             <Typography variant="body2" color="text.secondary">
-                              Primary property values will appear here once an item is selected.
+                              {favoritePropertyPaths.length
+                                ? 'The current selection does not expose any of your favourite properties yet. Try selecting another item.'
+                                : 'Mark properties as favourites from the All tab to pin them here.'}
                             </Typography>
                           </Paper>
                         )}
-                      </Box>
-
-                      <Box
-                        role="tabpanel"
-                        hidden={selectedPropertyTab !== 'identity'}
-                        sx={{
-                          display: selectedPropertyTab === 'identity' ? 'flex' : 'none',
-                          flexDirection: 'column',
-                          gap: 1,
-                        }}
-                      >
-                        {renderPropertyRows(
-                          identityRows,
-                          'Identity values will appear here once an item is selected.'
-                        )}
-                      </Box>
-
-                      <Box
-                        role="tabpanel"
-                        hidden={selectedPropertyTab !== 'propertySets'}
-                        sx={{
-                          display: selectedPropertyTab === 'propertySets' ? 'flex' : 'none',
-                          flexDirection: 'column',
-                          gap: 1,
-                        }}
-                      >
-                        {renderPropertyRows(
-                          propertySetsRows,
-                          'Property sets will appear here once they are available for the selected element.'
-                        )}
-                      </Box>
-
-                      <Box
-                        role="tabpanel"
-                        hidden={selectedPropertyTab !== 'quantitySets'}
-                        sx={{
-                          display: selectedPropertyTab === 'quantitySets' ? 'flex' : 'none',
-                          flexDirection: 'column',
-                          gap: 1,
-                        }}
-                      >
-                        {renderPropertyRows(
-                          quantityRows,
-                          'Quantity sets will appear here once they are available for the selected element.'
+                        {missingFavoriteCount > 0 && favoritePropertyPaths.length > 0 && (
+                          <Alert severity="info" variant="outlined">
+                            {missingFavoriteCount === 1
+                              ? '1 favourite property is not available for this selection.'
+                              : `${missingFavoriteCount} favourite properties are not available for this selection.`}
+                          </Alert>
                         )}
                       </Box>
 
@@ -2248,37 +2337,72 @@ const App: React.FC = () => {
                             placeholder="Search properties…"
                             disabled={!componentsReady}
                           />
+                          <Tooltip title="Export properties">
+                            <span>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                startIcon={<FileDownloadIcon />}
+                                onClick={handleOpenExportDialog}
+                                disabled={!propertyRows.length && !models.length}
+                              >
+                                Export
+                              </Button>
+                            </span>
+                          </Tooltip>
                         </Box>
-                        {propertySearch.trim() && (
-                          <Paper
-                            variant="outlined"
-                            sx={{
-                              maxHeight: 160,
-                              overflowY: 'auto',
-                              p: 1,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: 0.75,
-                            }}
-                          >
-                            {matchedPropertyRows.length === 0 ? (
-                              <Typography variant="body2" color="text.secondary">
-                                No properties matched “{propertySearch.trim()}”.
-                              </Typography>
-                            ) : (
-                              matchedPropertyRows.map((row) => (
-                                <Box key={row.path} sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
-                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                    {row.label}
-                                  </Typography>
-                                  <Typography variant="body2" color="text.secondary">
-                                    {row.value ? row.value : '—'}
-                                  </Typography>
-                                </Box>
-                              ))
-                            )}
+
+                        {!propertyRows.length ? (
+                          <Paper variant="outlined" sx={{ p: 1 }}>
+                            <Typography variant="body2" color="text.secondary">
+                              Select an item to view its properties.
+                            </Typography>
                           </Paper>
+                        ) : hasPropertySearch ? (
+                          matchedPropertyRows.length ? (
+                            <Paper
+                              variant="outlined"
+                              sx={{
+                                maxHeight: 160,
+                                overflowY: 'auto',
+                                p: 1,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 0.75,
+                              }}
+                            >
+                              {matchedPropertyRows.map(renderPropertyRow)}
+                            </Paper>
+                          ) : (
+                            <Paper variant="outlined" sx={{ p: 1 }}>
+                              <Typography variant="body2" color="text.secondary">
+                                {`No properties matched "${propertySearchTerm}".`}
+                              </Typography>
+                            </Paper>
+                          )
+                        ) : (
+                          <React.Fragment>
+                            <Paper
+                              variant="outlined"
+                              sx={{
+                                maxHeight: 220,
+                                overflowY: 'auto',
+                                p: 1,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 0.75,
+                              }}
+                            >
+                              {limitedPropertyRows.map(renderPropertyRow)}
+                            </Paper>
+                            {truncatedPropertyCount > 0 && (
+                              <Alert severity="info" variant="outlined">
+                                {`Displaying the first ${limitedPropertyRows.length} properties. ${truncatedPropertyCount} more not shown.`}
+                              </Alert>
+                            )}
+                          </React.Fragment>
                         )}
+
                         <Box
                           ref={itemsDataContainerRef}
                           sx={{
@@ -2349,6 +2473,77 @@ const App: React.FC = () => {
           </IconButton>
         </Paper>
       )}
+
+      <Dialog open={exportDialogOpen} onClose={handleCloseExportDialog} fullWidth maxWidth="sm">
+        <DialogTitle>Export properties</DialogTitle>
+        <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <FormControl component="fieldset" variant="standard">
+            <FormLabel component="legend">Scope</FormLabel>
+            <RadioGroup
+              value={exportScope}
+              onChange={(event) => setExportScope(event.target.value as 'selected' | 'model')}
+            >
+              <FormControlLabel
+                value="selected"
+                control={<Radio />}
+                label="Selected items"
+                disabled={!propertyRows.length}
+              />
+              <FormControlLabel
+                value="model"
+                control={<Radio />}
+                label="Specific model"
+                disabled={!models.length}
+              />
+            </RadioGroup>
+          </FormControl>
+
+          <Collapse in={exportScope === 'model'} unmountOnExit>
+            <TextField
+              select
+              fullWidth
+              label="Model"
+              value={exportModelId}
+              onChange={(event) => setExportModelId(event.target.value)}
+              disabled={!models.length}
+            >
+              {models.map((model) => (
+                <MenuItem key={model.id} value={model.id}>
+                  {model.label}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Collapse>
+
+          {exportScope === 'selected' && !propertyRows.length && (
+            <Alert severity="warning" variant="outlined">
+              Select at least one item before exporting the current selection.
+            </Alert>
+          )}
+
+          {exportError && (
+            <Alert severity="error" variant="outlined">
+              {exportError}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseExportDialog} disabled={isExporting}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleConfirmExport}
+            disabled={
+              isExporting ||
+              (exportScope === 'selected' && !propertyRows.length) ||
+              (exportScope === 'model' && !exportModelId)
+            }
+          >
+            {isExporting ? 'Exporting…' : 'Export CSV'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <ChatWindow
         getModelDataForAI={getModelDataForAI}
