@@ -64,16 +64,6 @@ type PropertyNode = {
 
 type PropertyTabId = 'favorites' | 'all';
 
-type ItemsDataTableData = {
-  Name: string;
-  Value: any;
-};
-
-type ItemsDataGroup = {
-  data: ItemsDataTableData;
-  children?: ItemsDataGroup[];
-};
-
 type ModelSummary = {
   modelId: string;
   label: string;
@@ -249,52 +239,6 @@ const extractNominalValue = (value: any): string => {
     return `${formatPrimitive(value.x)}, ${formatPrimitive(value.y)}, ${formatPrimitive(value.z)}`;
   }
   return formatPrimitive(value);
-};
-
-const stringifyItemsDataValue = (value: any): string => {
-  if (value == null) return '';
-  if (Array.isArray(value)) {
-    return value.map((entry) => stringifyItemsDataValue(entry)).filter(Boolean).join(', ');
-  }
-  if (typeof value === 'object') {
-    if ('NominalValue' in value) return stringifyItemsDataValue((value as any).NominalValue);
-    if ('nominalValue' in value) return stringifyItemsDataValue((value as any).nominalValue);
-    if ('value' in value) return stringifyItemsDataValue((value as any).value);
-    if ('Value' in value) return stringifyItemsDataValue((value as any).Value);
-    const coords = ['x', 'y', 'z'];
-    if (coords.every((axis) => typeof (value as any)[axis] === 'number')) {
-      return coords.map((axis) => formatPrimitive((value as any)[axis])).join(', ');
-    }
-    try {
-      const json = JSON.stringify(value);
-      return json && json !== '{}' ? json : '';
-    } catch {
-      return String(value);
-    }
-  }
-  return formatPrimitive(value);
-};
-
-const collectItemsDataRows = (groups: ItemsDataGroup[], prefix: string[] = []) => {
-  const rows: { path: string; value: string }[] = [];
-  for (const group of groups) {
-    if (!group || !group.data) continue;
-    const rawName = group.data.Name;
-    let nameText = '';
-    if (typeof rawName === 'string') nameText = rawName.trim();
-    else if (rawName != null) nameText = String(rawName).trim();
-    const displayName = nameText ? prettifyLabel(nameText) || nameText : '';
-    const pathParts = displayName ? [...prefix, displayName] : [...prefix];
-    const path = pathParts.filter(Boolean).join(' / ');
-    const valueText = stringifyItemsDataValue(group.data.Value);
-    if (path && valueText !== '') {
-      rows.push({ path, value: valueText });
-    }
-    if (group.children && group.children.length) {
-      rows.push(...collectItemsDataRows(group.children, pathParts));
-    }
-  }
-  return rows;
 };
 
 const findFirstValueByKeywords = (source: any, keywords: string[]): string | undefined => {
@@ -682,20 +626,25 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
 
   const propertySetRows = collectIfcPropertySetRows(item);
   if (propertySetRows.length) {
-    const existingByPath = new Map<string, PropertyRow>();
-    rows.forEach((row) => existingByPath.set(row.path, row));
+    const dedupedPropertySetRows: PropertyRow[] = [];
+    const propertySetPathSet = new Set<string>();
 
-    propertySetRows.forEach((psetRow) => {
-      const existing = existingByPath.get(psetRow.path);
-      if (existing) {
-        existing.label = psetRow.label;
-        existing.value = psetRow.value;
-        existing.searchText = psetRow.searchText;
-      } else {
-        rows.push(psetRow);
-        existingByPath.set(psetRow.path, psetRow);
+    for (const row of propertySetRows) {
+      if (propertySetPathSet.has(row.path)) continue;
+      propertySetPathSet.add(row.path);
+      dedupedPropertySetRows.push(row);
+    }
+
+    const remainingRows: PropertyRow[] = [];
+    for (const row of rows) {
+      if (propertySetPathSet.has(row.path)) {
+        // Skip older representation of the same property-set entry; we'll use the enriched one.
+        continue;
       }
-    });
+      remainingRows.push(row);
+    }
+
+    rows.splice(0, rows.length, ...dedupedPropertySetRows, ...remainingRows);
   }
 
   return { rows, tree };
@@ -737,19 +686,21 @@ const App: React.FC = () => {
   const modelsListContainerRef = useRef<HTMLDivElement | null>(null);
   const modelsListElementRef = useRef<HTMLElement | null>(null);
   const updateModelsListRef = useRef<ReturnType<typeof BUIC.tables.modelsList>[1] | null>(null);
-  const itemsDataContainerRef = useRef<HTMLDivElement | null>(null);
-  const itemsDataElementRef = useRef<HTMLElement | null>(null);
-  const updateItemsDataRef = useRef<ReturnType<typeof BUIC.tables.itemsData>[1] | null>(null);
-  const lastItemsDataContainerRef = useRef<HTMLDivElement | null>(null);
+  const modelTreeContainerRef = useRef<HTMLDivElement | null>(null);
+  const modelTreeElementRef = useRef<HTMLElement | null>(null);
+  const updateModelTreeRef = useRef<ReturnType<typeof BUIC.tables.spatialTree>[1] | null>(null);
+  const lastModelTreeContainerRef = useRef<HTMLDivElement | null>(null);
   const hiderRef = useRef<OBC.Hider | null>(null);
   const selectedRef = useRef<Selection[]>([]);
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number } | null>(null);
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
-  const [propertySearch, setPropertySearch] = useState('');
+  const [selectionSearch, setSelectionSearch] = useState('');
+  const [modelTreeSearch, setModelTreeSearch] = useState('');
   const [favoritePropertyPaths, setFavoritePropertyPaths] = useState<string[]>([]);
   const [selectedPropertyTab, setSelectedPropertyTab] = useState<PropertyTabId>('favorites');
   const [isModelsSectionCollapsed, setIsModelsSectionCollapsed] = useState(false);
-  const [isPropertiesSectionCollapsed, setIsPropertiesSectionCollapsed] = useState(false);
+  const [isSelectionPropertiesCollapsed, setIsSelectionPropertiesCollapsed] = useState(false);
+  const [isModelTreeCollapsed, setIsModelTreeCollapsed] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatExpandSignal, setChatExpandSignal] = useState(0);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
@@ -786,14 +737,14 @@ const App: React.FC = () => {
     }
   }, [favoritePropertyPaths]);
 
-  const propertySearchTerm = propertySearch.trim();
-  const hasPropertySearch = propertySearchTerm.length > 0;
+  const selectionSearchTerm = selectionSearch.trim();
+  const hasSelectionSearch = selectionSearchTerm.length > 0;
 
   const matchedPropertyRows = useMemo(() => {
-    const term = propertySearchTerm.toLowerCase();
+    const term = selectionSearchTerm.toLowerCase();
     if (!term) return [] as PropertyRow[];
     return propertyRows.filter((row) => row.searchText.includes(term)).slice(0, MAX_SEARCH_RESULTS);
-  }, [propertySearchTerm, propertyRows]);
+  }, [selectionSearchTerm, propertyRows]);
 
   const propertyRowMap = useMemo(() => {
     const map = new Map<string, PropertyRow>();
@@ -995,15 +946,6 @@ const App: React.FC = () => {
     }
   }, [buildCsvContent, exportModelId, exportScope, gatherModelPropertyRows, isExporting, propertyRows]);
 
-  const detachItemsDataListener = useCallback(
-    (table: (BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void }) | null | undefined) => {
-      if (!table?.__aiDataHandler) return;
-      table.removeEventListener('datacomputed', table.__aiDataHandler);
-      delete table.__aiDataHandler;
-    },
-    []
-  );
-
   const updateSelectedProperties = useCallback(
     (data: Record<string, any> | null) => {
       const normalized = data ?? null;
@@ -1011,6 +953,15 @@ const App: React.FC = () => {
       const { rows } = buildPropertyData(normalized);
       setPropertyRows(rows);
       setSelectedPropertyTab(favoritePropertyPaths.length ? 'favorites' : 'all');
+      if (rows.length) {
+        setLastItemsDataRows(rows.map((row) => ({ path: row.label, value: row.value })));
+        const header = 'Path\tValue';
+        const tsvRows = rows.map((row) => `${row.label}\t${row.value ?? ''}`);
+        setLastItemsDataTSV([header, ...tsvRows].join('\r\n'));
+      } else {
+        setLastItemsDataRows([]);
+        setLastItemsDataTSV(null);
+      }
     },
     [favoritePropertyPaths.length]
   );
@@ -1254,30 +1205,6 @@ const App: React.FC = () => {
       }
     };
 
-    const registerItemsDataListener = (table: BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void }) => {
-      if (!table || table.__aiDataHandler) return;
-      const handler = () => {
-        const groups = Array.isArray(table.data) ? table.data : [];
-        if (!groups.length) {
-          setLastItemsDataTSV(null);
-          setLastItemsDataRows([]);
-          return;
-        }
-        try {
-          const snapshot = table.tsv;
-          setLastItemsDataTSV(typeof snapshot === 'string' && snapshot.trim() ? snapshot : null);
-          const flattened = collectItemsDataRows(groups as unknown as ItemsDataGroup[]);
-          setLastItemsDataRows(flattened);
-        } catch (err) {
-          console.warn('Failed to capture ItemsData snapshot for AI context', err);
-          setLastItemsDataRows([]);
-        }
-      };
-      table.__aiDataHandler = handler;
-      table.addEventListener('datacomputed', handler);
-      handler();
-    };
-
     ensureChild(modelsListContainerRef.current, modelsListElementRef, () => {
       const [element, update] = BUIC.tables.modelsList({ components });
       updateModelsListRef.current = update;
@@ -1293,90 +1220,53 @@ const App: React.FC = () => {
       }
     }
 
-    if (itemsDataContainerRef.current !== lastItemsDataContainerRef.current) {
-      detachItemsDataListener(itemsDataElementRef.current as BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void });
-      itemsDataElementRef.current = null;
-      updateItemsDataRef.current = null;
-      lastItemsDataContainerRef.current = itemsDataContainerRef.current;
+    if (modelTreeContainerRef.current !== lastModelTreeContainerRef.current) {
+      modelTreeElementRef.current = null;
+      updateModelTreeRef.current = null;
+      lastModelTreeContainerRef.current = modelTreeContainerRef.current;
     }
 
-    ensureChild(itemsDataContainerRef.current, itemsDataElementRef, () => {
-      const [element, update] = BUIC.tables.itemsData({
+    ensureChild(modelTreeContainerRef.current, modelTreeElementRef, () => {
+      const [element, update] = BUIC.tables.spatialTree({
         components,
-        modelIdMap: {},
-        emptySelectionWarning: true,
+        models: Array.from(fragments.list.values()),
       });
-      updateItemsDataRef.current = update;
+      updateModelTreeRef.current = update;
       element.style.width = '100%';
       element.style.height = '100%';
       element.style.overflow = 'auto';
-      const tableElement = element as BUI.Table<ItemsDataTableData> & {
-        queryString: string | null;
-        preserveStructureOnFilter?: boolean;
-        indentationInText?: boolean;
-        __aiDataHandler?: () => void;
-      };
-      tableElement.preserveStructureOnFilter = true;
-      tableElement.indentationInText = false;
-      tableElement.queryString = propertySearch.trim() ? propertySearch.trim() : null;
-      const currentSelection = selectedRef.current;
-      const modelIdMap: Record<string, Set<number>> = {};
-      if (currentSelection && currentSelection.length) {
-        for (const entry of currentSelection) {
-          if (!modelIdMap[entry.modelId]) {
-            modelIdMap[entry.modelId] = new Set<number>();
-          }
-          modelIdMap[entry.modelId].add(entry.localId);
-        }
-      }
-      update({
-        components,
-        modelIdMap,
-        emptySelectionWarning: !currentSelection || currentSelection.length === 0,
-      });
-      registerItemsDataListener(tableElement);
+      const tableElement = element as BUI.Table<any> & { queryString?: string | null };
+      tableElement.queryString = modelTreeSearch.trim() ? modelTreeSearch.trim() : null;
       return element;
     });
 
-    if (itemsDataElementRef.current) {
-      registerItemsDataListener(itemsDataElementRef.current as BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void });
+    if (updateModelTreeRef.current) {
+      updateModelTreeRef.current({
+        components,
+        models: Array.from(fragments.list.values()),
+      });
     }
-
-    return () => {
-      detachItemsDataListener(itemsDataElementRef.current as BUI.Table<ItemsDataTableData> & { __aiDataHandler?: () => void });
-    };
-
-  }, [componentsReady, detachItemsDataListener, isExplorerOpen, propertySearch]);
+  }, [componentsReady, isExplorerOpen, modelTreeSearch, models]);
 
   useEffect(() => {
     if (!componentsReady) return;
     const components = componentsRef.current;
-    const updateItemsData = updateItemsDataRef.current;
-    if (!components || !updateItemsData) return;
+    const fragments = fragmentsRef.current;
+    const updateTree = updateModelTreeRef.current;
+    if (!components || !fragments || !updateTree) return;
 
-    const modelIdMap: Record<string, Set<number>> = {};
-    if (selectedItems.length) {
-      for (const entry of selectedItems) {
-        if (!modelIdMap[entry.modelId]) {
-          modelIdMap[entry.modelId] = new Set<number>();
-        }
-        modelIdMap[entry.modelId].add(entry.localId);
-      }
-    }
-
-    updateItemsData({
+    updateTree({
       components,
-      modelIdMap,
-      emptySelectionWarning: selectedItems.length === 0,
+      models: Array.from(fragments.list.values()),
     });
-  }, [componentsReady, selectedItems]);
+  }, [componentsReady, models]);
 
   useEffect(() => {
-    const table = itemsDataElementRef.current as (BUI.Table<any> & { queryString?: string | null }) | null;
+    const table = modelTreeElementRef.current as (BUI.Table<any> & { queryString?: string | null }) | null;
     if (!table) return;
-    const term = propertySearch.trim();
+    const term = modelTreeSearch.trim();
     table.queryString = term ? term : null;
-  }, [propertySearch]);
+  }, [modelTreeSearch]);
 
   // File handler (safe input reset)
   const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async () => {
@@ -2429,15 +2319,27 @@ const App: React.FC = () => {
                   </Collapse>
                 </Box>
                 
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflow: 'hidden' }}>
+                <Box
+                  sx={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 1.25,
+                    overflow: 'hidden',
+                    borderRadius: 1.5,
+                    border: '1px solid',
+                    borderColor: 'rgba(229, 57, 53, 0.45)',
+                    bgcolor: 'rgba(229, 57, 53, 0.08)',
+                    p: 1.5,
+                  }}
+                >
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                    <Typography variant="subtitle2">Selected Item Data</Typography>
-                    <IconButton size="small" onClick={() => setIsPropertiesSectionCollapsed((prev) => !prev)}>
-                      {isPropertiesSectionCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
+                    <Typography variant="subtitle2">Selection Properties</Typography>
+                    <IconButton size="small" onClick={() => setIsSelectionPropertiesCollapsed((prev) => !prev)}>
+                      {isSelectionPropertiesCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
                     </IconButton>
                   </Box>
-                  <Collapse in={!isPropertiesSectionCollapsed} timeout="auto">
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, minHeight: 0 }}>
+                  <Collapse in={!isSelectionPropertiesCollapsed} timeout="auto">
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, minHeight: 0 }}>
                       <Tabs
                         value={selectedPropertyTab}
                         onChange={(_, value) => setSelectedPropertyTab(value as PropertyTabId)}
@@ -2513,10 +2415,10 @@ const App: React.FC = () => {
                           <TextField
                             size="small"
                             fullWidth
-                            value={propertySearch}
-                            onChange={(event) => setPropertySearch(event.target.value)}
+                            value={selectionSearch}
+                            onChange={(event) => setSelectionSearch(event.target.value)}
                             placeholder="Search properties…"
-                            disabled={!componentsReady}
+                            disabled={!propertyRows.length}
                           />
                           <Tooltip title="Export properties">
                             <span>
@@ -2536,15 +2438,15 @@ const App: React.FC = () => {
                         {!propertyRows.length ? (
                           <Paper variant="outlined" sx={{ p: 1 }}>
                             <Typography variant="body2" color="text.secondary">
-                              Select an item to view its properties.
+                              Select an element in the viewer to view its Property Sets / NV_BIM / … breakdown.
                             </Typography>
                           </Paper>
-                        ) : hasPropertySearch ? (
+                        ) : hasSelectionSearch ? (
                           matchedPropertyRows.length ? (
                             <Paper
                               variant="outlined"
                               sx={{
-                                maxHeight: 160,
+                                maxHeight: 200,
                                 overflowY: 'auto',
                                 p: 1,
                                 display: 'flex',
@@ -2557,7 +2459,7 @@ const App: React.FC = () => {
                           ) : (
                             <Paper variant="outlined" sx={{ p: 1 }}>
                               <Typography variant="body2" color="text.secondary">
-                                {`No properties matched "${propertySearchTerm}".`}
+                                {`No properties matched "${selectionSearchTerm}".`}
                               </Typography>
                             </Paper>
                           )
@@ -2566,7 +2468,7 @@ const App: React.FC = () => {
                             <Paper
                               variant="outlined"
                               sx={{
-                                maxHeight: 220,
+                                maxHeight: 240,
                                 overflowY: 'auto',
                                 p: 1,
                                 display: 'flex',
@@ -2583,46 +2485,75 @@ const App: React.FC = () => {
                             )}
                           </React.Fragment>
                         )}
+                      </Box>
+                    </Box>
+                  </Collapse>
+                </Box>
 
+                <Box
+                  sx={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 1.25,
+                    overflow: 'hidden',
+                    borderRadius: 1.5,
+                    border: '1px solid',
+                    borderColor: 'rgba(255, 179, 0, 0.5)',
+                    bgcolor: 'rgba(255, 213, 79, 0.12)',
+                    p: 1.5,
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                    <Typography variant="subtitle2">Model Tree</Typography>
+                    <IconButton size="small" onClick={() => setIsModelTreeCollapsed((prev) => !prev)}>
+                      {isModelTreeCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
+                    </IconButton>
+                  </Box>
+                  <Collapse in={!isModelTreeCollapsed} timeout="auto">
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, minHeight: 0 }}>
+                      <TextField
+                        size="small"
+                        fullWidth
+                        value={modelTreeSearch}
+                        onChange={(event) => setModelTreeSearch(event.target.value)}
+                        placeholder="Search the model tree…"
+                        disabled={!models.length}
+                      />
+                      <Box
+                        sx={{
+                          position: 'relative',
+                          border: '1px solid',
+                          borderColor: 'divider',
+                          borderRadius: 1,
+                          minHeight: 240,
+                          maxHeight: 360,
+                          overflow: 'hidden',
+                          bgcolor: 'background.paper',
+                        }}
+                      >
                         <Box
-                          ref={itemsDataContainerRef}
-                          sx={{
-                            border: '1px solid',
-                            borderColor: 'divider',
-                            borderRadius: 1,
-                            minHeight: 180,
-                            maxHeight: 300,
-                            flex: 1,
-                            display: 'flex',
-                            flexDirection: 'column',
-                            overflow: 'hidden',
-                            position: 'relative',
-                          }}
-                        >
-                          {!componentsReady ? (
-                            <Box sx={{ p: 2 }}>
-                              <Typography variant="body2" color="text.secondary">
-                                Viewer is initializing…
-                              </Typography>
-                            </Box>
-                          ) : !properties ? (
-                            <Box
-                              sx={{
-                                position: 'absolute',
-                                inset: 0,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                px: 2,
-                                textAlign: 'center',
-                              }}
-                            >
-                              <Typography variant="body2" color="text.secondary">
-                                Select an element in the viewer to see its full property structure.
-                              </Typography>
-                            </Box>
-                          ) : null}
-                        </Box>
+                          ref={modelTreeContainerRef}
+                          sx={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}
+                        />
+                        {(!componentsReady || !models.length) && (
+                          <Box
+                            sx={{
+                              position: 'absolute',
+                              inset: 0,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              textAlign: 'center',
+                              px: 2,
+                            }}
+                          >
+                            <Typography variant="body2" color="text.secondary">
+                              {componentsReady
+                                ? 'Load a model to populate the full model tree.'
+                                : 'Viewer is initializing the model tree…'}
+                            </Typography>
+                          </Box>
+                        )}
                       </Box>
                     </Box>
                   </Collapse>
