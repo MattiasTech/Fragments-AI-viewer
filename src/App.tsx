@@ -35,6 +35,7 @@ import MinimizeIcon from '@mui/icons-material/Minimize';
 import OpenInFullIcon from '@mui/icons-material/OpenInFull';
 import ViewListIcon from '@mui/icons-material/ViewList';
 import ChatIcon from '@mui/icons-material/Chat';
+import RuleIcon from '@mui/icons-material/Rule';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import StarIcon from '@mui/icons-material/Star';
@@ -43,6 +44,9 @@ import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import * as THREE from 'three';
 import Stats from 'stats.js';
 import ChatWindow, { SelectionCommand } from './ChatWindow';
+import IdsPanel from './ids/IdsPanel';
+import { idsStore } from './ids/ids.store';
+import type { ElementData, ViewerApi } from './ids/ids.types';
 
 type Selection = { modelId: string; localId: number };
 
@@ -51,6 +55,9 @@ type PropertyRow = {
   value: string;
   path: string;
   searchText: string;
+  rawPsetName?: string;
+  rawPropertyName?: string;
+  rawValue?: any;
 };
 
 type PropertyNode = {
@@ -74,6 +81,34 @@ type ModelSummary = {
   bboxSize: { x: number; y: number; z: number };
   bboxCenter: { x: number; y: number; z: number };
   collectedAt: number;
+};
+
+const selectionsMatch = (a: Selection[], b: Selection[]) => {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    const next = a[index];
+    const prev = b[index];
+    if (!prev || next.modelId !== prev.modelId || next.localId !== prev.localId) {
+      return false;
+    }
+  }
+  return true;
+};
+
+type IdsElementRecord = {
+  element: ElementData;
+  modelId: string;
+  localId: number;
+  psets: Record<string, Record<string, unknown>>;
+  attributes: Record<string, unknown>;
+  raw: Record<string, unknown>;
+};
+
+type IdsCache = {
+  signature: string;
+  records: Map<string, IdsElementRecord>;
+  elements: ElementData[];
+  modelLocalIds: Map<string, number[]>;
 };
 
 const FILTER_KEY_ALIASES: Record<string, string[]> = {
@@ -269,6 +304,9 @@ const findFirstValueByKeywords = (source: any, keywords: string[]): string | und
           return value.toString();
         } else if (typeof value === 'boolean') {
           return value ? 'true' : 'false';
+        } else if (value && typeof value === 'object') {
+          const extracted = extractNominalValue(value);
+          if (extracted) return extracted;
         }
       }
       if (value && typeof value === 'object') {
@@ -330,6 +368,16 @@ const TOP_LEVEL_LABELS: Record<string, string> = {
 
 const IGNORED_TOP_LEVEL_KEYS = new Set<string>(['modelIdMap']);
 const sanitizeKey = (value: string) => value.replace(/[^a-z0-9]+/gi, '-').replace(/-{2,}/g, '-').replace(/(^-|-$)/g, '').toLowerCase();
+
+const normalizeIdsToken = (value: string): string => {
+  if (!value) return '';
+  return value
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-zA-Z0-9_.:-]+/g, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/^_+|_+$/g, '');
+};
 
 const IFC_PROPERTY_COLLECTION_KEYS = ['HasProperties', 'hasProperties', 'Properties', 'properties'] as const;
 
@@ -431,6 +479,9 @@ const extractPropertySetRows = (pset: Record<string, any>, rawName: string, uniq
       value: valueText || '',
       path: `property-sets/${uniquePsetKey}/${uniquePropertyKey}`,
       searchText: searchPieces.join(' ').trim(),
+      rawPsetName: rawName,
+      rawPropertyName: rawPropertyName,
+      rawValue: property,
     });
   });
 
@@ -658,6 +709,7 @@ const App: React.FC = () => {
   const worldRef = useRef<OBC.SimpleWorld<OBC.SimpleScene, OBC.OrthoPerspectiveCamera, OBC.SimpleRenderer> | null>(null);
   const componentsRef = useRef<OBC.Components | null>(null);
   const fragmentsRef = useRef<OBC.FragmentsManager | null>(null);
+  const fragmentsReadyRef = useRef(false);
   const ifcImporterRef = useRef<FRAGS.IfcImporter | null>(null);
   const currentModelIdRef = useRef<string | null>(null);
   const workerUrlRef = useRef<string | null>(null);
@@ -690,8 +742,12 @@ const App: React.FC = () => {
   const modelTreeElementRef = useRef<HTMLElement | null>(null);
   const updateModelTreeRef = useRef<ReturnType<typeof BUIC.tables.spatialTree>[1] | null>(null);
   const lastModelTreeContainerRef = useRef<HTMLDivElement | null>(null);
+  const lastModelsSignatureRef = useRef<string | null>(null);
   const hiderRef = useRef<OBC.Hider | null>(null);
   const selectedRef = useRef<Selection[]>([]);
+  const idsCacheRef = useRef<IdsCache | null>(null);
+  const idsCachePromiseRef = useRef<Promise<IdsCache> | null>(null);
+  const viewerApiRef = useRef<ViewerApi | null>(null);
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number } | null>(null);
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
   const [selectionSearch, setSelectionSearch] = useState('');
@@ -703,6 +759,8 @@ const App: React.FC = () => {
   const [isModelTreeCollapsed, setIsModelTreeCollapsed] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatExpandSignal, setChatExpandSignal] = useState(0);
+  const [isIdsOpen, setIsIdsOpen] = useState(false);
+  const [idsExpandSignal, setIdsExpandSignal] = useState(0);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
   const [lastItemsDataTSV, setLastItemsDataTSV] = useState<string | null>(null);
   const [lastItemsDataRows, setLastItemsDataRows] = useState<{ path: string; value: string }[]>([]);
@@ -711,6 +769,16 @@ const App: React.FC = () => {
   const [exportModelId, setExportModelId] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  const getWorldCamera = useCallback((): OBC.OrthoPerspectiveCamera | null => {
+    const world = worldRef.current;
+    return (world?.camera as OBC.OrthoPerspectiveCamera | undefined) ?? null;
+  }, []);
+
+  const getThreeCamera = useCallback((): (THREE.PerspectiveCamera | THREE.OrthographicCamera) | null => {
+    const camera = getWorldCamera();
+    return (camera?.three as THREE.PerspectiveCamera | THREE.OrthographicCamera | undefined) ?? null;
+  }, [getWorldCamera]);
 
   useEffect(() => {
     try {
@@ -785,6 +853,8 @@ const App: React.FC = () => {
       return [...prev, path];
     });
   }, []);
+
+  const modelsSignature = useMemo(() => models.map((model) => `${model.id}:${model.label}`).join('|'), [models]);
 
   const renderPropertyRow = useCallback(
     (row: PropertyRow) => {
@@ -989,14 +1059,407 @@ const App: React.FC = () => {
     });
   }, []);
 
+  const extractIfcClassFromData = useCallback((data: any): string => {
+    if (!data || typeof data !== 'object') return 'IfcProduct';
+    const candidates = [
+      (data as any).ifcClass,
+      (data as any).IfcClass,
+      (data as any).type,
+      (data as any).Type,
+      (data as any).expressType,
+      (data as any).ExpressType,
+      (data as any).entity,
+      (data as any).Entity,
+      data?.attributes?.ifcClass,
+      data?.Attributes?.IfcClass,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim().length) {
+        return candidate.trim();
+      }
+    }
+    const fallback = findFirstValueByKeywords(data, ['ifcclass', 'ifc type', 'type']);
+    if (fallback) return fallback;
+    return 'IfcProduct';
+  }, []);
+
+  const flattenPropertiesForIds = useCallback((data: any, globalId: string, ifcClass: string) => {
+    const flattened: Record<string, unknown> = {};
+    const psets: Record<string, Record<string, unknown>> = {};
+    const attributes: Record<string, unknown> = {};
+
+    const propertyRows = collectIfcPropertySetRows(data);
+    propertyRows.forEach((row) => {
+      const labelParts = row.label.split('/').map((part) => part.trim());
+      const rawPset = row.rawPsetName ?? labelParts[1] ?? '';
+      const rawProperty = row.rawPropertyName ?? labelParts[labelParts.length - 1] ?? '';
+      const normalizedPset = normalizeIdsToken(rawPset);
+      const normalizedProperty = normalizeIdsToken(rawProperty);
+      if (!normalizedPset || !normalizedProperty) return;
+      if (!psets[normalizedPset]) {
+        psets[normalizedPset] = {};
+      }
+      if (!(normalizedProperty in psets[normalizedPset])) {
+        psets[normalizedPset][normalizedProperty] = row.value;
+      }
+      const path = `${normalizedPset}.${normalizedProperty}`;
+      if (!(path in flattened)) {
+        flattened[path] = row.value;
+      }
+    });
+
+    flattened.GlobalId = globalId;
+    flattened.ifcClass = ifcClass;
+    attributes.ifcClass = ifcClass;
+
+    const name = readName(data);
+    if (name) {
+      attributes.Name = name;
+      flattened['Attributes.Name'] = name;
+    }
+
+    const category = findFirstValueByKeywords(data, ['category', 'ifccategory']);
+    if (category) {
+      attributes.Category = category;
+      flattened['Attributes.Category'] = category;
+    }
+
+    const typeValue = findFirstValueByKeywords(data, ['type', 'typename']);
+    if (typeValue) {
+      attributes.Type = typeValue;
+      flattened['Attributes.Type'] = typeValue;
+    }
+
+    return { flattened, psets, attributes };
+  }, []);
+
+  const computeIdsSignature = useCallback(() => {
+    const fragments = fragmentsRef.current;
+    if (!fragments) return 'empty';
+    const ids = Array.from(fragments.list.keys()).sort();
+    return `${ids.join('|')}|${models.length}`;
+  }, [models]);
+
+  const ensureIdsCache = useCallback(async (): Promise<IdsCache> => {
+    const fragments = fragmentsRef.current;
+    if (!fragments || fragments.list.size === 0) {
+      const empty: IdsCache = { signature: 'empty', records: new Map(), elements: [], modelLocalIds: new Map() };
+      idsCacheRef.current = empty;
+      return empty;
+    }
+
+    const signature = computeIdsSignature();
+    if (idsCacheRef.current && idsCacheRef.current.signature === signature) {
+      return idsCacheRef.current;
+    }
+
+    if (idsCachePromiseRef.current) {
+      return idsCachePromiseRef.current;
+    }
+
+    const promise = (async () => {
+      const records = new Map<string, IdsElementRecord>();
+      const elements: ElementData[] = [];
+      const modelLocalIds = new Map<string, number[]>();
+
+      for (const [modelId, model] of fragments.list) {
+        let localIds: number[] = [];
+        try {
+          const fetched = await model.getLocalIds();
+          if (Array.isArray(fetched)) localIds = fetched;
+          else if (fetched && typeof (fetched as any)[Symbol.iterator] === 'function') {
+            localIds = Array.from(fetched as Iterable<number>);
+          }
+        } catch (error) {
+          console.warn(`IDS cache: failed to read local IDs for model ${modelId}`, error);
+          continue;
+        }
+
+        modelLocalIds.set(modelId, localIds.slice());
+        if (!localIds.length) continue;
+
+        const chunkSize = 48;
+        for (let index = 0; index < localIds.length; index += chunkSize) {
+          const chunk = localIds.slice(index, index + chunkSize);
+          let batch: any[] = [];
+          try {
+            batch = await model.getItemsData(chunk);
+          } catch (error) {
+            console.warn(`IDS cache: failed to fetch items data for model ${modelId}`, error);
+            continue;
+          }
+
+          batch.forEach((itemData, position) => {
+            if (!itemData) return;
+            const localId = chunk[position];
+            const globalIdCandidate =
+              (typeof itemData.GlobalId === 'string' && itemData.GlobalId.trim()) ||
+              (typeof itemData.GlobalID === 'string' && itemData.GlobalID.trim()) ||
+              findFirstValueByKeywords(itemData, ['globalid', 'global id', 'guid']);
+            if (!globalIdCandidate) {
+              console.warn('IDS cache: missing GlobalId for localId', {
+                modelId,
+                localId,
+                itemData,
+              });
+              return;
+            }
+            const globalId = globalIdCandidate.trim();
+            if (!globalId.length || records.has(globalId)) return;
+
+            const ifcClass = extractIfcClassFromData(itemData);
+            const { flattened, psets, attributes } = flattenPropertiesForIds(itemData, globalId, ifcClass);
+            const element: ElementData = { GlobalId: globalId, ifcClass, properties: flattened };
+
+            const rawData = itemData as Record<string, unknown>;
+            if (typeof rawData.GlobalId !== 'string' || !rawData.GlobalId.trim()) {
+              rawData.GlobalId = globalId;
+            }
+            records.set(globalId, {
+              element,
+              modelId,
+              localId,
+              psets,
+              attributes,
+              raw: rawData,
+            });
+            elements.push(element);
+          });
+        }
+      }
+
+      const cache: IdsCache = { signature, records, elements, modelLocalIds };
+      idsCacheRef.current = cache;
+      return cache;
+    })().finally(() => {
+      idsCachePromiseRef.current = null;
+    });
+
+    idsCachePromiseRef.current = promise;
+    return promise;
+  }, [computeIdsSignature, flattenPropertiesForIds, extractIfcClassFromData]);
+
+  const groupLocalIdsByModel = useCallback(
+    async (globalIds: string[]) => {
+      const cache = await ensureIdsCache();
+      const grouped = new Map<string, number[]>();
+      globalIds.forEach((id) => {
+        const record = cache.records.get(id);
+        if (!record) return;
+        const existing = grouped.get(record.modelId);
+        if (existing) existing.push(record.localId);
+        else grouped.set(record.modelId, [record.localId]);
+      });
+      return { grouped, cache };
+    },
+    [ensureIdsCache]
+  );
+
+  const viewerApi = React.useMemo<ViewerApi>(() => ({
+    listGlobalIds: async () => {
+      const cache = await ensureIdsCache();
+      return cache.elements.map((element) => element.GlobalId);
+    },
+    getElementProps: async (globalId: string) => {
+      const cache = await ensureIdsCache();
+      const record = cache.records.get(globalId);
+      if (!record) {
+        throw new Error(`Element with GlobalId ${globalId} is not available.`);
+      }
+      return {
+        ifcClass: record.element.ifcClass,
+        psets: record.psets,
+        attributes: record.attributes,
+      };
+    },
+    countElements: async () => {
+      const cache = await ensureIdsCache();
+      return cache.elements.length;
+    },
+    iterElements: (options) => {
+      const batchSize = Math.max(1, Math.floor(options?.batchSize ?? 100));
+      return {
+        async *[Symbol.asyncIterator]() {
+          const cache = await ensureIdsCache();
+          const records = Array.from(cache.records.values());
+          for (let index = 0; index < records.length; index += batchSize) {
+            const slice = records.slice(index, index + batchSize).map((record) => ({
+              modelId: record.modelId,
+              localId: record.localId,
+              data: {
+                ...record.raw,
+                GlobalId: record.element.GlobalId,
+              } as Record<string, unknown>,
+            }));
+            if (slice.length) {
+              yield slice;
+            }
+          }
+        },
+      } as AsyncIterable<
+        Array<{
+          modelId: string;
+          localId: number;
+          data: Record<string, unknown>;
+        }>
+      >;
+    },
+    color: async (globalIds, rgba) => {
+      if (!globalIds.length) return;
+      const highlighter = highlighterRef.current;
+      const fragments = fragmentsRef.current;
+      if (!highlighter || !fragmentsReadyRef.current || !fragments) return;
+      const { grouped } = await groupLocalIdsByModel(globalIds);
+      const colorHex = new THREE.Color(rgba.r, rgba.g, rgba.b).getHex();
+      for (const [modelId, localIds] of grouped) {
+        const model = fragments.list.get(modelId);
+        if (!model || !localIds.length) continue;
+        if (typeof highlighter.highlightById === 'function') {
+          await Promise.resolve(highlighter.highlightById(model, localIds, colorHex));
+        } else if (typeof highlighter.highlightByID === 'function') {
+          await Promise.resolve(highlighter.highlightByID(model, localIds, colorHex));
+        } else if (typeof highlighter.add === 'function') {
+          highlighter.add(model, localIds, colorHex);
+        }
+      }
+    },
+    clearColors: async () => {
+      const highlighter = highlighterRef.current;
+      if (!fragmentsReadyRef.current) return;
+      try {
+        await Promise.resolve(highlighter?.clear?.());
+      } catch (error) {
+        console.warn('Failed to clear IDS highlights', error);
+      }
+      try {
+        const prev = prevInstanceHighlightRef.current;
+        if (prev && prev.mesh && prev.mesh.instanceColor) {
+          const white = new THREE.Color(1, 1, 1);
+          prev.mesh.setColorAt(prev.index, white);
+          prev.mesh.instanceColor.needsUpdate = true;
+        }
+      } catch (error) {
+        console.warn('Failed to reset instanced mesh highlight', error);
+      }
+      prevInstanceHighlightRef.current = null;
+    },
+    isolate: async (globalIds) => {
+      const hider = hiderRef.current;
+      if (!hider || !fragmentsReadyRef.current) return;
+      await Promise.resolve(hider.set(true));
+      if (!globalIds.length || !fragmentsReadyRef.current) return;
+      const cache = await ensureIdsCache();
+      const keepMap = new Map<string, Set<number>>();
+      globalIds.forEach((id) => {
+        const record = cache.records.get(id);
+        if (!record) return;
+        const set = keepMap.get(record.modelId);
+        if (set) set.add(record.localId);
+        else keepMap.set(record.modelId, new Set([record.localId]));
+      });
+      const hideMap: Record<string, Set<number>> = {};
+      cache.modelLocalIds.forEach((localIds, modelId) => {
+        const keep = keepMap.get(modelId) ?? new Set<number>();
+        const toHide = localIds.filter((localId) => !keep.has(localId));
+        if (toHide.length) {
+          hideMap[modelId] = new Set(toHide);
+        }
+      });
+      if (Object.keys(hideMap).length) {
+        await Promise.resolve(hider.set(false, hideMap));
+      }
+    },
+    clearIsolation: async () => {
+      const hider = hiderRef.current;
+      if (!hider) return;
+      await Promise.resolve(hider.set(true));
+    },
+    fitViewTo: async (globalIds) => {
+      if (!globalIds.length) return;
+      const world = worldRef.current;
+      const fragments = fragmentsRef.current;
+      if (!world || !fragments || !fragmentsReadyRef.current) return;
+      const camera = world.camera ?? null;
+      const controls = camera?.controls ?? null;
+      const threeCamera = camera?.three ?? null;
+      const { grouped } = await groupLocalIdsByModel(globalIds);
+      const boundingBox = new THREE.Box3();
+      let hasBox = false;
+      for (const modelId of grouped.keys()) {
+        const model = fragments.list.get(modelId);
+        if (!model || !model.object) continue;
+        const modelBox = new THREE.Box3().setFromObject(model.object);
+        if (!modelBox.isEmpty()) {
+          if (!hasBox) {
+            boundingBox.copy(modelBox);
+            hasBox = true;
+          } else {
+            boundingBox.union(modelBox);
+          }
+        }
+      }
+      if (!hasBox) return;
+      const center = new THREE.Vector3();
+      const size = new THREE.Vector3();
+      boundingBox.getCenter(center);
+      boundingBox.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z) || 10;
+      const dist = maxDim * 2.4;
+      if (controls) {
+        controls.setLookAt(center.x + dist, center.y + dist, center.z + dist, center.x, center.y, center.z, true);
+      } else if (threeCamera) {
+        threeCamera.position.set(center.x + dist, center.y + dist, center.z + dist);
+        threeCamera.lookAt(center);
+      }
+    },
+  }), [ensureIdsCache, groupLocalIdsByModel]);
+
+  viewerApiRef.current = viewerApi;
+
+  const openIdsPanel = useCallback(() => {
+    setIsIdsOpen(true);
+    setIdsExpandSignal((value) => value + 1);
+  }, []);
+
+  const closeIdsPanel = useCallback(() => {
+    setIsIdsOpen(false);
+    const api = viewerApiRef.current;
+    if (!api) return;
+    Promise.resolve(api.clearColors()).catch(() => {});
+    if (api.clearIsolation) {
+      Promise.resolve(api.clearIsolation()).catch(() => {});
+    }
+  }, []);
+
+  const toggleIdsPanel = useCallback(() => {
+    setIsIdsOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setIdsExpandSignal((value) => value + 1);
+      }
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     selectedRef.current = selectedItems;
   }, [selectedItems]);
+
+  useEffect(() => {
+    idsCacheRef.current = null;
+    idsCachePromiseRef.current = null;
+    try {
+      idsStore.invalidateCaches();
+    } catch (error) {
+      console.warn('Failed to invalidate IDS caches', error);
+    }
+  }, [models]);
 
 
   useEffect(() => {
     const container = viewerRef.current;
     if (!container) return;
+    let disposed = false;
 
     if (!uiInitializedRef.current) {
       BUI.Manager.init();
@@ -1024,17 +1487,6 @@ const App: React.FC = () => {
     const ambient = new THREE.AmbientLight(0xffffff, 1.0);
     world.scene.three.add(ambient);
 
-    components.init();
-    components.get(OBC.Grids).create(world);
-
-    const highlighter = components.get(OBCF.Highlighter);
-    highlighter.setup({ world });
-    highlighter.zoomToSelection = true;
-    highlighterRef.current = highlighter;
-
-  const hider = components.get(OBC.Hider);
-  hiderRef.current = hider;
-
     worldRef.current = world;
 
     const stats = new Stats();
@@ -1047,89 +1499,12 @@ const App: React.FC = () => {
     world.renderer.onBeforeUpdate.add(() => stats.begin());
     world.renderer.onAfterUpdate.add(() => stats.end());
 
-    const init = async () => {
-      const fetched = await fetch('https://thatopen.github.io/engine_fragment/resources/worker.mjs');
-      const blob = await fetched.blob();
-      const workerUrl = URL.createObjectURL(new File([blob], 'worker.mjs', { type: 'text/javascript' }));
-      workerUrlRef.current = workerUrl;
-
-      const fragments = components.get(OBC.FragmentsManager);
-      fragments.init(workerUrl);
-      fragmentsRef.current = fragments;
-
-      world.camera.controls?.addEventListener('rest', () => fragments.core.update(true));
-
-      const ifcImporter = new FRAGS.IfcImporter();
-      const baseUrl = (import.meta as any).env?.BASE_URL ?? '/';
-      ifcImporter.wasm = {
-        path: `${baseUrl}web-ifc/`,
-        absolute: true,
-      };
-      ifcImporterRef.current = ifcImporter;
-    };
-    init();
-
-    setComponentsReady(true);
-
-    const navCanvas = document.createElement('canvas');
-    navCanvas.width = 110;
-    navCanvas.height = 110;
-    navCanvas.className = 'nav-cube';
-    container.appendChild(navCanvas);
-    navCubeRef.current = navCanvas;
-
-    const nScene = new THREE.Scene();
-    const nCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
-    nCamera.position.set(0, 0, 5);
-    const nRenderer = new THREE.WebGLRenderer({ canvas: navCanvas, alpha: true, antialias: true });
-    nRenderer.setPixelRatio(window.devicePixelRatio);
-    nRenderer.setSize(110, 110);
-    const cubeGeom = new THREE.BoxGeometry(1.4, 1.4, 1.4);
-    const cube = new THREE.Mesh(cubeGeom, new THREE.MeshNormalMaterial({ flatShading: true }));
-    nScene.add(cube);
-    const dl = new THREE.DirectionalLight(0xffffff, 0.8);
-    dl.position.set(5, 10, 7);
-    nScene.add(dl);
-    navCubeState.current = { scene: nScene, camera: nCamera, renderer: nRenderer, cube };
-
-    world.renderer.onAfterUpdate.add(() => {
-      const st = navCubeState.current;
-      if (!st) return;
-      st.cube.quaternion.copy(world.camera.three.quaternion);
-      st.renderer.render(st.scene, st.camera);
-    });
-
-    const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2();
-    const onNavClick = async (ev: MouseEvent) => {
-      const st = navCubeState.current;
-      if (!st) return;
-      const rect = navCanvas.getBoundingClientRect();
-      mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(mouse, st.camera);
-      const hit = raycaster.intersectObject(st.cube, true)[0];
-      if (!hit || !hit.face) return;
-      const normal = hit.face.normal.clone().transformDirection(st.cube.matrixWorld);
-      const target = new THREE.Vector3();
-      const fragments = fragmentsRef.current;
-      if (fragments && fragments.list.size) {
-        const full = new THREE.Box3();
-        for (const model of fragments.list.values()) full.expandByObject(model.object);
-        full.getCenter(target);
-        const sphere = new THREE.Sphere();
-        full.getBoundingSphere(sphere);
-        const dist = Math.max(3, sphere.radius * 3);
-        const eye = target.clone().add(normal.multiplyScalar(dist));
-        await world.camera.controls?.setLookAt(eye.x, eye.y, eye.z, target.x, target.y, target.z, true);
-        return;
-      }
-      const eye = normal.clone().multiplyScalar(10);
-      await world.camera.controls?.setLookAt(eye.x, eye.y, eye.z, 0, 0, 0, true);
-    };
-    navCanvas.addEventListener('click', onNavClick);
+    let detachHighlighterListeners: (() => void) | null = null;
 
     const highlightHandler = async (modelIdMap: Record<string, Set<number>>) => {
+      if (!fragmentsReadyRef.current) {
+        return;
+      }
       const selections: Selection[] = [];
       for (const [modelId, ids] of Object.entries(modelIdMap)) {
         ids.forEach((id) => {
@@ -1138,6 +1513,13 @@ const App: React.FC = () => {
           }
         });
       }
+      const prevSelections = selectedRef.current;
+      const selectionChanged = !selectionsMatch(selections, prevSelections);
+
+      if (!selectionChanged) {
+        return;
+      }
+
       setSelectedItems(selections);
       handleExplorerOpen();
 
@@ -1166,22 +1548,168 @@ const App: React.FC = () => {
       updateSelectedProperties(null);
     };
 
-    highlighter.events.select.onHighlight.add(highlightHandler);
-    highlighter.events.select.onClear.add(clearHandler);
+    const init = async () => {
+      try {
+        await Promise.resolve(components.init());
+      } catch (error) {
+        console.error('Failed to initialize viewer components', error);
+        return;
+      }
 
-    return () => {
-      (async () => {
+      if (disposed) return;
+
+      try {
+        components.get(OBC.Grids).create(world);
+      } catch (error) {
+        console.warn('Failed to create grid component', error);
+      }
+
+      const fetched = await fetch('https://thatopen.github.io/engine_fragment/resources/worker.mjs');
+      const blob = await fetched.blob();
+      const workerUrl = URL.createObjectURL(new File([blob], 'worker.mjs', { type: 'text/javascript' }));
+      workerUrlRef.current = workerUrl;
+
+      const fragments = components.get(OBC.FragmentsManager);
+      await fragments.init(workerUrl);
+      fragmentsRef.current = fragments;
+      fragmentsReadyRef.current = true;
+
+      const highlighter = components.get(OBCF.Highlighter);
+      highlighter.setup({ world });
+      highlighter.zoomToSelection = true;
+      highlighterRef.current = highlighter;
+
+      const hider = components.get(OBC.Hider);
+      hiderRef.current = hider;
+
+      highlighter.events.select.onHighlight.add(highlightHandler);
+      highlighter.events.select.onClear.add(clearHandler);
+      detachHighlighterListeners = () => {
         highlighter.events.select.onHighlight.remove?.(highlightHandler);
         highlighter.events.select.onClear.remove?.(clearHandler);
+      };
 
-        try { await hiderRef.current?.set?.(true); } catch {}
+  getWorldCamera()?.controls?.addEventListener('rest', () => fragments.core.update(true));
+
+      const ifcImporter = new FRAGS.IfcImporter();
+      const baseUrl = (import.meta as any).env?.BASE_URL ?? '/';
+      ifcImporter.wasm = {
+        path: `${baseUrl}web-ifc/`,
+        absolute: true,
+      };
+      ifcImporterRef.current = ifcImporter;
+
+      if (!disposed) {
+        setComponentsReady(true);
+      }
+    };
+    init().catch((error) => {
+      console.error('Failed to initialize viewer fragments', error);
+    });
+
+    const navCanvas = document.createElement('canvas');
+    navCanvas.width = 110;
+    navCanvas.height = 110;
+    navCanvas.className = 'nav-cube';
+    container.appendChild(navCanvas);
+    navCubeRef.current = navCanvas;
+
+    const nScene = new THREE.Scene();
+    const nCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+    nCamera.position.set(0, 0, 5);
+    const nRenderer = new THREE.WebGLRenderer({ canvas: navCanvas, alpha: true, antialias: true });
+    nRenderer.setPixelRatio(window.devicePixelRatio);
+    nRenderer.setSize(110, 110);
+    const cubeGeom = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+    const cube = new THREE.Mesh(cubeGeom, new THREE.MeshNormalMaterial({ flatShading: true }));
+    nScene.add(cube);
+    const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+    dl.position.set(5, 10, 7);
+    nScene.add(dl);
+    navCubeState.current = { scene: nScene, camera: nCamera, renderer: nRenderer, cube };
+
+    world.renderer.onAfterUpdate.add(() => {
+      const st = navCubeState.current;
+      if (!st) return;
+      const threeCamera = getThreeCamera();
+      if (!threeCamera) return;
+      st.cube.quaternion.copy(threeCamera.quaternion);
+      st.renderer.render(st.scene, st.camera);
+    });
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const onNavClick = async (ev: MouseEvent) => {
+      const st = navCubeState.current;
+      if (!st) return;
+      const rect = navCanvas.getBoundingClientRect();
+      mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, st.camera);
+      const hit = raycaster.intersectObject(st.cube, true)[0];
+      if (!hit || !hit.face) return;
+      const normal = hit.face.normal.clone().transformDirection(st.cube.matrixWorld);
+      const target = new THREE.Vector3();
+      const fragments = fragmentsRef.current;
+      const controls = getWorldCamera()?.controls ?? null;
+      const threeCamera = getThreeCamera();
+      if (!controls && !threeCamera) {
+        console.warn('Navigation cube interaction skipped: viewer camera not ready.');
+        return;
+      }
+      if (fragments && fragments.list.size) {
+        const full = new THREE.Box3();
+        for (const model of fragments.list.values()) full.expandByObject(model.object);
+        full.getCenter(target);
+        const sphere = new THREE.Sphere();
+        full.getBoundingSphere(sphere);
+        const dist = Math.max(3, sphere.radius * 3);
+        const eye = target.clone().add(normal.multiplyScalar(dist));
+        if (controls) {
+          await controls.setLookAt(eye.x, eye.y, eye.z, target.x, target.y, target.z, true);
+        } else if (threeCamera) {
+          threeCamera.position.set(eye.x, eye.y, eye.z);
+          threeCamera.lookAt(target);
+        }
+        return;
+      }
+      const eye = normal.clone().multiplyScalar(10);
+      if (controls) {
+        await controls.setLookAt(eye.x, eye.y, eye.z, 0, 0, 0, true);
+      } else if (threeCamera) {
+        threeCamera.position.set(eye.x, eye.y, eye.z);
+        threeCamera.lookAt(0, 0, 0);
+      }
+    };
+    navCanvas.addEventListener('click', onNavClick);
+
+    return () => {
+      disposed = true;
+      (async () => {
+        const wasReady = fragmentsReadyRef.current;
+        fragmentsReadyRef.current = false;
+        detachHighlighterListeners?.();
+        detachHighlighterListeners = null;
+
+        try {
+          if (wasReady) {
+            await hiderRef.current?.set?.(true);
+          }
+        } catch {}
         if (fragmentsRef.current) {
           const ids = [...fragmentsRef.current.list.keys()];
           await Promise.all(ids.map((id) => fragmentsRef.current!.core.disposeModel(id)));
         }
-        try { highlighterRef.current?.clear?.(); } catch {}
-        if (workerUrlRef.current) URL.revokeObjectURL(workerUrlRef.current);
-        try { container.replaceChildren(); } catch { /* no-op */ }
+        try {
+          if (wasReady) {
+            highlighterRef.current?.clear?.();
+          }
+        } catch {}
+  if (workerUrlRef.current) URL.revokeObjectURL(workerUrlRef.current);
+  try { components.dispose(); } catch {}
+  try { container.replaceChildren(); } catch { /* no-op */ }
+        highlighterRef.current = null;
+        hiderRef.current = null;
       })();
     };
   }, []);
@@ -1191,6 +1719,8 @@ const App: React.FC = () => {
     const components = componentsRef.current;
     const fragments = fragmentsRef.current;
     if (!components || !fragments) return;
+
+    const signature = modelsSignature;
 
     const ensureChild = <T extends HTMLElement>(container: HTMLDivElement | null, elementRef: React.MutableRefObject<T | null>, create: () => T) => {
       if (!container) return;
@@ -1212,7 +1742,10 @@ const App: React.FC = () => {
     });
 
     if (modelsListElementRef.current) {
-      updateModelsListRef.current?.({ components });
+      const needsUpdate = !modelsListElementRef.current.dataset.initialized || signature !== lastModelsSignatureRef.current;
+      if (needsUpdate) {
+        updateModelsListRef.current?.({ components });
+      }
       if (!modelsListElementRef.current.dataset.initialized) {
         modelsListElementRef.current.dataset.initialized = 'true';
         modelsListElementRef.current.style.width = '100%';
@@ -1246,7 +1779,9 @@ const App: React.FC = () => {
         models: Array.from(fragments.list.values()),
       });
     }
-  }, [componentsReady, isExplorerOpen, modelTreeSearch, models]);
+
+    lastModelsSignatureRef.current = signature;
+  }, [componentsReady, isExplorerOpen, modelTreeSearch, modelsSignature]);
 
   useEffect(() => {
     if (!componentsReady) return;
@@ -1259,7 +1794,7 @@ const App: React.FC = () => {
       components,
       models: Array.from(fragments.list.values()),
     });
-  }, [componentsReady, models]);
+  }, [componentsReady, modelsSignature]);
 
   useEffect(() => {
     const table = modelTreeElementRef.current as (BUI.Table<any> & { queryString?: string | null }) | null;
@@ -1275,7 +1810,7 @@ const App: React.FC = () => {
     if (!file) return;
 
     const ext = file.name.split('.').pop()?.toLowerCase();
-  const fragments = fragmentsRef.current;
+    const fragments = fragmentsRef.current;
     const ifcImporter = ifcImporterRef.current;
     const world = worldRef.current;
 
@@ -1285,11 +1820,15 @@ const App: React.FC = () => {
       return;
     }
 
+    const camera = getWorldCamera();
+    const threeCamera = camera?.three ?? null;
+    const cameraControls = camera?.controls ?? null;
+
     // Keep previously loaded models to allow multi-model exploration
     let usedIfcProgress = false;
     try {
-  const modelId = `${file.name}-${Date.now()}`;
-  let model: any;
+    const modelId = `${file.name}-${Date.now()}`;
+    let model: any;
 
       if (ext === 'ifc') {
         if (!ifcImporter) throw new Error('IFC importer is not ready.');
@@ -1346,12 +1885,16 @@ const App: React.FC = () => {
         return;
       }
 
-    currentModelIdRef.current = modelId;
-      model.useCamera(world.camera.three);
+      currentModelIdRef.current = modelId;
+      if (threeCamera) {
+        model.useCamera(threeCamera);
+      } else {
+        console.warn('World camera not ready; skipping model camera binding.');
+      }
       world.scene.three.add(model.object);
 
       // Ensure fragments finish building GPU buffers before computing bounds
-  await fragments.core.update(true);
+    await fragments.core.update(true);
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 
       // --- Center & fit ---
@@ -1366,19 +1909,19 @@ const App: React.FC = () => {
 
       // Fit camera to the model bounds (smooth = true)
       try {
-        if (world.camera.controls) {
-          await world.camera.controls.fitToBox(model.object, true);
+        if (cameraControls) {
+          await cameraControls.fitToBox(model.object, true);
         }
       } catch {
         // Fallback: basic look-at if fitToBox isn't available
         const size = new THREE.Vector3(); box.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z) || 10;
         const dist = maxDim * 2.5;
-        if (world.camera.controls) {
-          world.camera.controls.setLookAt(center.x + dist, center.y + dist, center.z + dist, center.x, center.y, center.z, true);
-        } else {
-          world.camera.three.position.set(center.x + dist, center.y + dist, center.z + dist);
-          world.camera.three.lookAt(center);
+        if (cameraControls) {
+          cameraControls.setLookAt(center.x + dist, center.y + dist, center.z + dist, center.x, center.y, center.z, true);
+        } else if (threeCamera) {
+          threeCamera.position.set(center.x + dist, center.y + dist, center.z + dist);
+          threeCamera.lookAt(center);
         }
       }
 
@@ -1492,6 +2035,10 @@ const App: React.FC = () => {
     const fragments = fragmentsRef.current;
     if (!fragments) {
       console.warn('AI selection requested but fragments are unavailable.');
+      return;
+    }
+    if (!fragmentsReadyRef.current) {
+      console.warn('AI selection requested before fragments were fully initialized.');
       return;
     }
 
@@ -1894,20 +2441,23 @@ const App: React.FC = () => {
     const world = worldRef.current;
     const fragments = fragmentsRef.current;
     const id = currentModelIdRef.current;
-    if (!world || !fragments || !id) return;
-  const record = fragments.list.get(id);
+    if (!world || !fragments || !id || !fragmentsReadyRef.current) return;
+    const record = fragments.list.get(id);
     if (!record) return;
 
     // Ensure updates
-  await fragments.core.update(true);
+    await fragments.core.update(true);
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 
     const obj = record.object;
     const box = new THREE.Box3().setFromObject(obj);
     if (!box.isEmpty()) {
+      const camera = getWorldCamera();
+      const controls = camera?.controls ?? null;
+      const threeCamera = camera?.three ?? null;
       try {
-        if (world.camera.controls) {
-          await world.camera.controls.fitToBox(obj, true);
+        if (controls) {
+          await controls.fitToBox(obj, true);
         }
       } catch (e) {
         const center = new THREE.Vector3();
@@ -1915,11 +2465,11 @@ const App: React.FC = () => {
         box.getCenter(center); box.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z) || 10;
         const dist = maxDim * 2.5;
-        if (world.camera.controls) {
-          world.camera.controls.setLookAt(center.x + dist, center.y + dist, center.z + dist, center.x, center.y, center.z, true);
-        } else {
-          world.camera.three.position.set(center.x + dist, center.y + dist, center.z + dist);
-          world.camera.three.lookAt(center);
+        if (controls) {
+          controls.setLookAt(center.x + dist, center.y + dist, center.z + dist, center.x, center.y, center.z, true);
+        } else if (threeCamera) {
+          threeCamera.position.set(center.x + dist, center.y + dist, center.z + dist);
+          threeCamera.lookAt(center);
         }
       }
     }
@@ -1928,7 +2478,7 @@ const App: React.FC = () => {
   const hideSelected = useCallback(async () => {
     const selection = selectedRef.current;
     const hider = hiderRef.current;
-    if (!selection || selection.length === 0 || !hider) {
+    if (!selection || selection.length === 0 || !hider || !fragmentsReadyRef.current) {
       setContextMenu(null);
       return;
     }
@@ -1953,7 +2503,7 @@ const App: React.FC = () => {
 
   const resetHidden = useCallback(async () => {
     const hider = hiderRef.current;
-    if (!hider) {
+    if (!hider || !fragmentsReadyRef.current) {
       setContextMenu(null);
       return;
     }
@@ -1979,14 +2529,19 @@ const App: React.FC = () => {
     const mouse = new THREE.Vector2();
     const pickAt = async (clientX: number, clientY: number) => {
       const fr = fragmentsRef.current; if (!fr) return;
+      const threeCamera = getThreeCamera();
+      if (!threeCamera) {
+        console.warn('Picking skipped: viewer camera not ready.');
+        return;
+      }
       const rect = dom.getBoundingClientRect();
       mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
       let best: { dist: number; model: any; localId: number; point?: THREE.Vector3; object?: any; instanceId?: number } | null = null;
       const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(mouse, world.camera.three);
-  for (const model of fr.list.values()) {
-        const hit = await model.raycast({ camera: world.camera.three, mouse, dom: world.renderer!.three.domElement! });
+    raycaster.setFromCamera(mouse, threeCamera);
+    for (const model of fr.list.values()) {
+        const hit = await model.raycast({ camera: threeCamera, mouse, dom: world.renderer!.three.domElement! });
         if (hit && typeof hit.distance === 'number') {
           const pt = (hit as any).point instanceof THREE.Vector3
             ? (hit as any).point.clone()
@@ -2080,16 +2635,23 @@ const App: React.FC = () => {
         marker.position.copy(pt);
         // Make ring face the camera
         const ringMesh = marker.children[1] as THREE.Mesh;
-        ringMesh.lookAt(world.camera.three.position);
+        const cameraForFacing = getThreeCamera();
+        if (cameraForFacing) {
+          ringMesh.lookAt(cameraForFacing.position);
+        }
         marker.visible = true;
       } catch { /* non-fatal */ }
 
-  setSelectedItems([{ modelId: best.model.modelId, localId: best.localId }]);
-      handleExplorerOpen();
-      try {
-  const [data] = await best.model.getItemsData([best.localId]);
-        updateSelectedProperties(data || null);
-      } catch {}
+      const prevSelections = selectedRef.current;
+      const newSelection = [{ modelId: best.model.modelId, localId: best.localId }];
+      if (!selectionsMatch(newSelection, prevSelections)) {
+        setSelectedItems(newSelection);
+        handleExplorerOpen();
+        try {
+          const [data] = await best.model.getItemsData([best.localId]);
+          updateSelectedProperties(data || null);
+        } catch {}
+      }
     };
     const onPointerDown = async (ev: PointerEvent) => {
       setContextMenu(null);
@@ -2148,11 +2710,14 @@ const App: React.FC = () => {
   const resetView = useCallback(() => {
     const world = worldRef.current;
     if (!world) return;
-    if (world.camera.controls) {
-      world.camera.controls.reset(true);
-    } else {
-      world.camera.three.position.set(10, 10, 10);
-      world.camera.three.lookAt(0, 0, 0);
+    const camera = getWorldCamera();
+    const controls = camera?.controls ?? null;
+    const threeCamera = camera?.three ?? null;
+    if (controls) {
+      controls.reset(true);
+    } else if (threeCamera) {
+      threeCamera.position.set(10, 10, 10);
+      threeCamera.lookAt(0, 0, 0);
     }
   }, []);
 
@@ -2196,6 +2761,24 @@ const App: React.FC = () => {
             title={isChatOpen ? 'Close AI Assistant' : 'Open AI Assistant'}
           >
             AI Assistant
+          </Button>
+          <Button
+            color="inherit"
+            onClick={toggleIdsPanel}
+            startIcon={<RuleIcon />}
+            aria-pressed={isIdsOpen}
+            sx={{
+              mr: 1,
+              borderRadius: 1.5,
+              backgroundColor: isIdsOpen ? 'rgba(255,255,255,0.18)' : 'transparent',
+              transition: 'background-color 0.2s ease',
+              '&:hover': {
+                backgroundColor: isIdsOpen ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.12)'
+              }
+            }}
+            title={isIdsOpen ? 'Close IDS Checker' : 'Open IDS Checker'}
+          >
+            IDS Checker
           </Button>
           <Button color="inherit" onClick={fitToCurrentModel} disabled={!modelLoaded} sx={{ mr: 1 }}>
             Fit to Model
@@ -2656,6 +3239,15 @@ const App: React.FC = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+        <IdsPanel
+          isOpen={isIdsOpen}
+          onOpen={openIdsPanel}
+          onClose={closeIdsPanel}
+          viewerApi={viewerApi}
+          hasModel={models.length > 0}
+          expandSignal={idsExpandSignal}
+        />
 
       <ChatWindow
         getModelDataForAI={getModelDataForAI}
