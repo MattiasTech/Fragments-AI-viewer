@@ -19,6 +19,7 @@ type PropertyConstraint = {
   expected?: string[];
   cardinality?: Cardinality;
   description?: string;
+  dataType?: string;
 };
 
 type CompiledRule = {
@@ -225,6 +226,12 @@ const parsePropertyConstraint = (propertyNode: any): PropertyConstraint | null =
     propertyNode.cardinality ?? propertyNode.Cardinality ?? propertyNode['ids:cardinality'],
     propertyNode['@_cardinality'] ?? propertyNode['@_Cardinality']
   );
+  const dataTypeAttr =
+    (typeof propertyNode['@_dataType'] === 'string' && propertyNode['@_dataType']) ??
+    (typeof propertyNode['@_DataType'] === 'string' && propertyNode['@_DataType']) ??
+    (typeof propertyNode['@_datatype'] === 'string' && propertyNode['@_datatype']) ??
+    (typeof propertyNode.dataType === 'string' && propertyNode.dataType) ??
+    (typeof propertyNode.DataType === 'string' && propertyNode.DataType);
   const expected = collectExpectedValues(propertyNode);
   const description = readText(propertyNode.description ?? propertyNode.Description ?? propertyNode['ids:description']);
   return {
@@ -232,7 +239,96 @@ const parsePropertyConstraint = (propertyNode: any): PropertyConstraint | null =
     expected: expected.length ? expected : undefined,
     cardinality,
     description,
+    dataType: dataTypeAttr ? dataTypeAttr.trim().toUpperCase() : undefined,
   };
+};
+
+const classifyDataType = (token: string | undefined): 'numeric' | 'boolean' | 'string' | 'unknown' => {
+  if (!token) return 'unknown';
+  const upper = token.trim().toUpperCase();
+  if (!upper.length) return 'unknown';
+  if (upper === 'IFCBOOLEAN' || upper === 'IFCLOGICAL') return 'boolean';
+  if (/(REAL|INTEGER|NUMBER|MEASURE|RATIO|COUNT|AREA|VOLUME|LENGTH|MASS|PRESSURE|POWER|TIME|FREQUENCY|TEMPERATURE|FORCE|MOMENT|THICKNESS|WIDTH|HEIGHT|DEPTH|DENSITY|ENERGY|SPEED|COEFFICIENT|FACTOR|ANGLE)/.test(upper)) {
+    return 'numeric';
+  }
+  if (/(TEXT|LABEL|IDENTIFIER|STRING|URI)/.test(upper)) {
+    return 'string';
+  }
+  return 'unknown';
+};
+
+const parseNumericValue = (value: string): number | null => {
+  if (!value) return null;
+  const normalized = value.replace(/,/g, '.');
+  const match = normalized.match(/[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?/);
+  if (!match) return null;
+  const parsed = Number.parseFloat(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeBooleanValue = (value: string): string | null => {
+  const lowered = value.trim().toLowerCase();
+  if (!lowered) return null;
+  if (['true', 't', 'yes', 'y', '1', 'on'].includes(lowered)) return 'TRUE';
+  if (['false', 'f', 'no', 'n', '0', 'off'].includes(lowered)) return 'FALSE';
+  return null;
+};
+
+const validateDataType = (actual: string, dataType?: string): { ok: boolean; normalized?: string; reason?: string } => {
+  const category = classifyDataType(dataType);
+  if (category === 'unknown') {
+    return { ok: true, normalized: actual };
+  }
+
+  if (category === 'numeric') {
+    const numeric = parseNumericValue(actual);
+    if (numeric === null) {
+      return {
+        ok: false,
+        reason: `Value is not numeric (expected ${dataType}).`,
+      };
+    }
+    return { ok: true, normalized: String(numeric) };
+  }
+
+  if (category === 'boolean') {
+    const normalized = normalizeBooleanValue(actual);
+    if (!normalized) {
+      return {
+        ok: false,
+        reason: `Value is not a valid boolean (expected ${dataType}).`,
+      };
+    }
+    return { ok: true, normalized };
+  }
+
+  if (category === 'string') {
+    const trimmed = actual.trim();
+    if (!trimmed.length) {
+      return {
+        ok: false,
+        reason: `Value is empty (expected ${dataType}).`,
+      };
+    }
+    return { ok: true, normalized: trimmed };
+  }
+
+  return { ok: true, normalized: actual };
+};
+
+const describeExpectation = (constraint: PropertyConstraint): string | undefined => {
+  const parts: string[] = [];
+  if (constraint.expected && constraint.expected.length) {
+    parts.push(`Values: ${constraint.expected.join(', ')}`);
+  }
+  if (constraint.dataType) {
+    parts.push(`Type: ${constraint.dataType}`);
+  }
+  if (constraint.cardinality) {
+    const max = constraint.cardinality.max === undefined ? '*' : constraint.cardinality.max;
+    parts.push(`Cardinality: ${constraint.cardinality.min}:${max}`);
+  }
+  return parts.length ? parts.join(' | ') : undefined;
 };
 
 const parseRule = (spec: any, index: number): CompiledRule | null => {
@@ -368,26 +464,43 @@ const evaluateConstraint = (
   constraint: PropertyConstraint
 ): { status: 'PASSED' | 'FAILED'; actual?: string; reason?: string } => {
   const actual = getPropertyValue(element.properties, constraint.path);
-  if (actual == null || actual === '') {
+  const actualString = actual == null ? '' : typeof actual === 'string' ? actual : String(actual);
+  const trimmedActual = actualString.trim();
+  if (!trimmedActual.length) {
     if (constraint.cardinality && constraint.cardinality.min > 0) {
-      return { status: 'FAILED', reason: 'Property missing', actual: actual ?? '' };
+        return { status: 'FAILED', reason: 'Property missing', actual: trimmedActual };
     }
     if (!constraint.cardinality) {
-      return { status: 'FAILED', reason: 'Property missing', actual: actual ?? '' };
+      return { status: 'FAILED', reason: 'Property missing', actual: trimmedActual };
     }
   }
+
+  let comparisonValue = trimmedActual;
+  if (constraint.dataType && trimmedActual.length) {
+    const result = validateDataType(trimmedActual, constraint.dataType);
+    if (!result.ok) {
+      return {
+        status: 'FAILED',
+        reason: result.reason,
+        actual: trimmedActual,
+      };
+    }
+    if (result.normalized !== undefined) {
+      comparisonValue = result.normalized;
+    }
+  }
+
   if (constraint.expected && constraint.expected.length) {
-    const normalizedActual = actual?.trim?.() ?? '';
-    const matches = constraint.expected.some((expected) => expected === normalizedActual);
+    const matches = constraint.expected.some((expected) => expected === comparisonValue);
     if (!matches) {
       return {
         status: 'FAILED',
         reason: `Value does not match expected list (${constraint.expected.join(', ')})`,
-        actual: normalizedActual,
+        actual: trimmedActual,
       };
     }
   }
-  return { status: 'PASSED', actual: actual ?? '' };
+  return { status: 'PASSED', actual: trimmedActual };
 };
 
 export const validateIfcJson = (
@@ -435,13 +548,14 @@ export const validateIfcJson = (
 
       rule.properties.forEach((constraint) => {
         const evaluation = evaluateConstraint(element, constraint);
+        const expectation = describeExpectation(constraint);
         const baseRow: Omit<DetailRow, 'status'> = {
           ruleId: rule.id,
           ruleTitle: rule.title,
           globalId: element.GlobalId,
           ifcClass: element.ifcClass,
           propertyPath: constraint.path,
-          expected: constraint.expected?.join(', '),
+          expected: expectation,
           actual: evaluation.actual,
         };
         if (evaluation.status === 'FAILED') {
