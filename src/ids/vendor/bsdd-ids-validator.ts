@@ -58,17 +58,77 @@ const readText = (node: any): string | undefined => {
   if (typeof node === 'string') return node.trim();
   if (typeof node === 'number' || typeof node === 'boolean') return String(node);
   if (typeof node === 'object') {
-    if (typeof node['@_value'] === 'string') return node['@_value'].trim();
-    if (typeof node.value === 'string') return node.value.trim();
-    if (typeof node['#text'] === 'string') return node['#text'].trim();
+    const candidates = [
+      node['@_value'],
+      node.value,
+      node.Value,
+      node['#text'],
+      node.simpleValue,
+      node.SimpleValue,
+      node['ids:simpleValue'],
+      node['ids:SimpleValue'],
+      node.text,
+      node.Text,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string') {
+        const trimmed = candidate.trim();
+        if (trimmed.length) return trimmed;
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate === 'object') {
+        const extracted = readText(candidate);
+        if (extracted) return extracted;
+      }
+    }
+
+    for (const value of Object.values(node)) {
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.length) return trimmed;
+      }
+      if (value && typeof value === 'object') {
+        const extracted = readText(value);
+        if (extracted) return extracted;
+      }
+    }
   }
   return undefined;
 };
 
-const parseCardinality = (raw: any): Cardinality | undefined => {
-  const text = readText(raw);
+const parseCardinalityKeyword = (keyword: string | undefined): Cardinality | undefined => {
+  if (!keyword) return undefined;
+  const normalized = keyword.trim().toLowerCase();
+  switch (normalized) {
+    case 'required':
+      return { min: 1 };
+    case 'optional':
+      return { min: 0 };
+    case 'prohibited':
+    case 'forbidden':
+    case 'excluded':
+      return { min: 0, max: 0 };
+    default:
+      return undefined;
+  }
+};
+
+const parseCardinality = (raw: any, attribute?: string | undefined): Cardinality | undefined => {
+  const keywordCardinality = parseCardinalityKeyword(attribute);
+  if (keywordCardinality) {
+    return keywordCardinality;
+  }
+
+  const text = readText(raw) ?? attribute;
   if (!text) return undefined;
-  const [minPart, maxPart] = text.split(':');
+  const parts = text.split(':');
+  if (parts.length === 1) {
+    const keyword = parseCardinalityKeyword(parts[0]);
+    if (keyword) return keyword;
+  }
+  const [minPart, maxPart] = parts;
   const min = Number(minPart);
   const max = maxPart === undefined || maxPart === '*' ? undefined : Number(maxPart);
   if (!Number.isFinite(min)) return undefined;
@@ -94,17 +154,79 @@ const extractSpecifications = (doc: any): any[] => {
   return toArray(specs);
 };
 
+const collectExpectedValues = (propertyNode: any): string[] => {
+  const results = new Set<string>();
+  const addEntry = (entry: any) => {
+    if (entry == null) return;
+    const candidates = Array.isArray(entry) ? entry : [entry];
+    candidates.forEach((candidate) => {
+      const text = readText(candidate);
+      if (text) {
+        results.add(text);
+      } else if (candidate && typeof candidate === 'object') {
+        Object.values(candidate).forEach((value) => {
+          const nested = readText(value);
+          if (nested) {
+            results.add(nested);
+          }
+        });
+      }
+    });
+  };
+
+  const allowedValues = propertyNode.allowedValues ?? propertyNode.AllowedValues ?? propertyNode['ids:allowedValues'];
+  if (allowedValues) {
+    addEntry(allowedValues);
+    const valueContainers = [allowedValues.values, allowedValues.Values, allowedValues['ids:values']];
+    valueContainers.forEach((container) => {
+      if (!container) return;
+      const items = Array.isArray(container) ? container : [container];
+      items.forEach((item) => {
+        addEntry(item);
+        addEntry(item.value ?? item.Value ?? item['ids:value']);
+      });
+    });
+  }
+
+  addEntry(propertyNode.value ?? propertyNode.Value ?? propertyNode['ids:value']);
+  addEntry(propertyNode.accept ?? propertyNode.Accept ?? propertyNode['ids:accept']);
+
+  return Array.from(results.values()).filter((entry) => entry.length);
+};
+
 const parsePropertyConstraint = (propertyNode: any): PropertyConstraint | null => {
-  const rawPset = readText(propertyNode.propertySet ?? propertyNode.PropertySet);
-  const rawName = readText(propertyNode.name ?? propertyNode.Name);
+  if (!propertyNode || typeof propertyNode !== 'object') return null;
+
+  const rawPset = readText(
+    propertyNode.propertySet ??
+      propertyNode.PropertySet ??
+      propertyNode['ids:propertySet'] ??
+      propertyNode['ids:PropertySet']
+  );
+  const rawBase = readText(
+    propertyNode.baseName ??
+      propertyNode.BaseName ??
+      propertyNode['ids:baseName'] ??
+      propertyNode['ids:BaseName']
+  );
+  const rawName =
+    rawBase ??
+    readText(
+      propertyNode.name ??
+        propertyNode.Name ??
+        propertyNode['ids:name'] ??
+        propertyNode['ids:Name']
+    );
+
   if (!rawPset || !rawName) return null;
+
   const path = `${normalizeToken(rawPset)}.${normalizeToken(rawName)}`;
-  const cardinality = parseCardinality(propertyNode.cardinality ?? propertyNode.Cardinality);
-  const expectedNodes = toArray(propertyNode.value ?? propertyNode.Value ?? propertyNode.accept ?? propertyNode.Accept);
-  const expected = expectedNodes
-    .map((entry) => readText(entry))
-    .filter((entry): entry is string => Boolean(entry && entry.length));
-  const description = readText(propertyNode.description ?? propertyNode.Description);
+  const cardinality = parseCardinality(
+    propertyNode.cardinality ?? propertyNode.Cardinality ?? propertyNode['ids:cardinality'],
+    propertyNode['@_cardinality'] ?? propertyNode['@_Cardinality']
+  );
+  const expected = collectExpectedValues(propertyNode);
+  const description = readText(propertyNode.description ?? propertyNode.Description ?? propertyNode['ids:description']);
   return {
     path,
     expected: expected.length ? expected : undefined,
@@ -117,26 +239,85 @@ const parseRule = (spec: any, index: number): CompiledRule | null => {
   const id = readText(spec['@_id'] ?? spec['@_identifier']) ?? `spec-${index + 1}`;
   const title = readText(spec['@_name'] ?? spec.name ?? spec.Name) ?? id;
 
-  const applicability = spec.applicability ?? spec.Applicability ?? spec['ids:applicability'];
-  const entities = toArray(applicability?.entity ?? applicability?.Entity ?? applicability?.['ids:entity']);
+  const applicability =
+    spec.applicability ??
+    spec.Applicability ??
+    spec['ids:applicability'] ??
+    spec['ids:Applicability'];
+  const entities = toArray(
+    applicability?.entity ??
+      applicability?.Entity ??
+      applicability?.['ids:entity'] ??
+      applicability?.['ids:Entity']
+  );
   const ifcClasses = entities
-    .map((entity) => normalizeIfcClass(readText(entity['@_name'] ?? entity.name ?? entity.Name ?? entity['#text'])))
+    .map((entity) => {
+      const primary = readText(
+        entity['@_name'] ??
+          entity.name ??
+          entity.Name ??
+          entity['ids:name'] ??
+          entity['ids:Name']
+      );
+      return normalizeIfcClass(primary ?? readText(entity));
+    })
     .filter((entry) => entry.length);
 
-  const requirementBlock = spec.requirement ?? spec.Requirement ?? spec['ids:requirement'];
-  const requirements = toArray(requirementBlock);
+  const requirementCandidates = [
+    spec.requirement,
+    spec.Requirement,
+    spec['ids:requirement'],
+    spec.requirements,
+    spec.Requirements,
+    spec['ids:requirements'],
+  ];
+  const requirements = requirementCandidates.flatMap((candidate) => toArray(candidate).filter(Boolean));
   const properties: PropertyConstraint[] = [];
-  requirements.forEach((requirement) => {
-    const propertyCandidates = toArray(
-      requirement?.property ?? requirement?.Property ?? requirement?.['ids:property'] ?? requirement?.properties ?? []
-    );
-    propertyCandidates.forEach((propertyNode) => {
+
+  const extractPropertyNodes = (node: any): any[] => {
+    if (!node || typeof node !== 'object') return [];
+    const propertyArrays = [
+      node.property,
+      node.Property,
+      node['ids:property'],
+      node.properties,
+      node.Properties,
+      node['ids:properties'],
+    ];
+    const collected = propertyArrays.flatMap((entry) => toArray(entry).filter(Boolean));
+    if (collected.length) return collected;
+    if (node.propertySet || node.PropertySet || node['ids:propertySet']) {
+      return [node];
+    }
+    return [];
+  };
+
+  const pushPropertiesFrom = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    extractPropertyNodes(node).forEach((propertyNode) => {
       const constraint = parsePropertyConstraint(propertyNode);
       if (constraint) {
         properties.push(constraint);
       }
     });
-  });
+    const nestedRequirements = toArray(
+      node.requirement ??
+        node.Requirement ??
+        node['ids:requirement'] ??
+        node.requirements ??
+        node.Requirements ??
+        node['ids:requirements']
+    );
+    nestedRequirements.forEach((nested) => pushPropertiesFrom(nested));
+  };
+
+  if (requirements.length) {
+    requirements.forEach((requirement) => {
+      pushPropertiesFrom(requirement);
+    });
+  } else {
+    pushPropertiesFrom(spec);
+  }
 
   if (!properties.length) return null;
 

@@ -43,17 +43,53 @@ import { useIdsActions, useIdsStore } from './ids.store';
 import { toCsv, toJson } from './ids.exports';
 
 const SAMPLE_IDS = `<ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS">
-  <ids:specification name="Walls must have FireRating">
-    <ids:applicability>
-      <ids:entity name="IfcWall" />
+  <ids:specification ifcVersion="IFC4" name="Walls must have FireRating">
+    <ids:applicability minOccurs="0" maxOccurs="unbounded">
+      <ids:entity>
+        <ids:name>
+          <ids:simpleValue>IFCWALL</ids:simpleValue>
+        </ids:name>
+      </ids:entity>
     </ids:applicability>
-    <ids:requirement>
-      <ids:property>
-        <ids:propertySet>Pset_WallCommon</ids:propertySet>
-        <ids:name>FireRating</ids:name>
-        <ids:cardinality>1:1</ids:cardinality>
+    <ids:requirements>
+      <ids:property cardinality="required">
+        <ids:propertySet>
+          <ids:simpleValue>Pset_WallCommon</ids:simpleValue>
+        </ids:propertySet>
+        <ids:baseName>
+          <ids:simpleValue>FireRating</ids:simpleValue>
+        </ids:baseName>
       </ids:property>
-    </ids:requirement>
+    </ids:requirements>
+  </ids:specification>
+  <ids:specification ifcVersion="IFC4" name="Pipes must be insulated">
+    <ids:applicability minOccurs="0" maxOccurs="unbounded">
+      <ids:entity>
+        <ids:name>
+          <ids:simpleValue>IFCFLOWSEGMENT</ids:simpleValue>
+        </ids:name>
+      </ids:entity>
+    </ids:applicability>
+    <ids:requirements>
+      <ids:property cardinality="required">
+        <ids:propertySet>
+          <ids:simpleValue>Insulation</ids:simpleValue>
+        </ids:propertySet>
+        <ids:baseName>
+          <ids:simpleValue>Insulation Type</ids:simpleValue>
+        </ids:baseName>
+        <ids:allowedValues>
+          <ids:values>
+            <ids:value>
+              <ids:simpleValue>-V19</ids:simpleValue>
+            </ids:value>
+            <ids:value>
+              <ids:simpleValue>Mineral Wool</ids:simpleValue>
+            </ids:value>
+          </ids:values>
+        </ids:allowedValues>
+      </ids:property>
+    </ids:requirements>
   </ids:specification>
 </ids:ids>`;
 
@@ -247,6 +283,12 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   const [detailSearch, setDetailSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<DetailStatusFilter>('ALL');
   const [ruleFilter, setRuleFilter] = useState<string>('ALL');
+
+  const tooltipSlotProps = useMemo(() => ({
+    popper: {
+      sx: { zIndex: 4000 },
+    },
+  }), []);
 
   const aggregateCounts = useMemo(() => {
     return rules.reduce(
@@ -552,20 +594,26 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
             {activeTab === 'summary' && (
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, overflow: 'hidden', minHeight: 0 }}>
                 <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <Button
-                    variant="contained"
-                    size="small"
-                    startIcon={<FileUploadIcon />}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    Load IDS XML
-                  </Button>
-                  <Button variant="outlined" size="small" onClick={handlePasteSample}>
-                    Paste Sample
-                  </Button>
-                  <Button variant="outlined" size="small" color="inherit" startIcon={<RestartAltIcon />} onClick={handleClearIds}>
-                    Clear
-                  </Button>
+                  <Tooltip title="Load IDS definition files" slotProps={tooltipSlotProps}>
+                    <Button
+                      variant="contained"
+                      size="small"
+                      startIcon={<FileUploadIcon />}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      Load IDS XML
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title="Insert a sample IDS specification" slotProps={tooltipSlotProps}>
+                    <Button variant="outlined" size="small" onClick={handlePasteSample}>
+                      Paste Sample
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title="Clear loaded IDS files and results" slotProps={tooltipSlotProps}>
+                    <Button variant="outlined" size="small" color="inherit" startIcon={<RestartAltIcon />} onClick={handleClearIds}>
+                      Clear
+                    </Button>
+                  </Tooltip>
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -575,15 +623,19 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                     onChange={handleFilesSelected}
                   />
                   <Box sx={{ flex: 1 }} />
-                  <Button
-                    variant="contained"
-                    size="small"
-                    startIcon={isChecking ? <CircularProgress size={16} color="inherit" /> : <PlayArrowIcon />}
-                    disabled={!hasIdsContent || !viewerApi || !hasModel || isChecking}
-                    onClick={handleRunCheck}
-                  >
-                    {isChecking ? 'Checking…' : 'Run Check'}
-                  </Button>
+                  <Tooltip title="Validate the loaded model against IDS requirements" slotProps={tooltipSlotProps}>
+                    <span>
+                      <Button
+                        variant="contained"
+                        size="small"
+                        startIcon={isChecking ? <CircularProgress size={16} color="inherit" /> : <PlayArrowIcon />}
+                        disabled={!hasIdsContent || !viewerApi || !hasModel || isChecking}
+                        onClick={handleRunCheck}
+                      >
+                        {isChecking ? 'Checking…' : 'Run Check'}
+                      </Button>
+                    </span>
+                  </Tooltip>
                 </Box>
 
                 {shouldRenderStatus && (
@@ -644,21 +696,21 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                           <ListItem
                             secondaryAction={
                               <Box sx={{ display: 'flex', gap: 1 }}>
-                                <Tooltip title="Highlight in viewer">
+                                <Tooltip title="Highlight in viewer" slotProps={tooltipSlotProps}>
                                   <span>
                                     <IconButton size="small" onClick={() => handleRuleHighlight(rule)}>
                                       <HighlightAltIcon fontSize="small" />
                                     </IconButton>
                                   </span>
                                 </Tooltip>
-                                <Tooltip title="Export rule CSV">
+                                <Tooltip title="Export rule CSV" slotProps={tooltipSlotProps}>
                                   <span>
                                     <IconButton size="small" onClick={() => handleExportRule(rule, 'csv')}>
                                       <DownloadIcon fontSize="small" />
                                     </IconButton>
                                   </span>
                                 </Tooltip>
-                                <Tooltip title="Export rule JSON">
+                                <Tooltip title="Export rule JSON" slotProps={tooltipSlotProps}>
                                   <span>
                                     <IconButton size="small" onClick={() => handleExportRule(rule, 'json')}>
                                       <AssessmentIcon fontSize="small" />
@@ -724,7 +776,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                       ))}
                     </Select>
                   </FormControl>
-                  <Tooltip title="Reset filters">
+                  <Tooltip title="Reset filters" slotProps={tooltipSlotProps}>
                     <span>
                       <IconButton size="small" onClick={() => { setRuleFilter('ALL'); setStatusFilter('ALL'); setDetailSearch(''); }}>
                         <ClearIcon fontSize="small" />
@@ -732,12 +784,32 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                     </span>
                   </Tooltip>
                   <Box sx={{ flex: 1 }} />
-                  <Button variant="outlined" size="small" startIcon={<DownloadIcon />} onClick={() => handleExportFiltered('csv')} disabled={!filteredRows.length}>
-                    Export CSV
-                  </Button>
-                  <Button variant="outlined" size="small" startIcon={<AssessmentIcon />} onClick={() => handleExportFiltered('json')} disabled={!filteredRows.length}>
-                    Export JSON
-                  </Button>
+                  <Tooltip title="Download the filtered results as CSV" slotProps={tooltipSlotProps}>
+                    <span>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<DownloadIcon />}
+                        onClick={() => handleExportFiltered('csv')}
+                        disabled={!filteredRows.length}
+                      >
+                        Export CSV
+                      </Button>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title="Download the filtered results as JSON" slotProps={tooltipSlotProps}>
+                    <span>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<AssessmentIcon />}
+                        onClick={() => handleExportFiltered('json')}
+                        disabled={!filteredRows.length}
+                      >
+                        Export JSON
+                      </Button>
+                    </span>
+                  </Tooltip>
                 </Box>
 
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>

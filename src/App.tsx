@@ -381,6 +381,28 @@ const normalizeIdsToken = (value: string): string => {
 
 const IFC_PROPERTY_COLLECTION_KEYS = ['HasProperties', 'hasProperties', 'Properties', 'properties'] as const;
 
+const PROPERTY_SET_CONTAINER_KEYS = ['psets', 'Psets', 'propertySets', 'PropertySets', 'property_sets', 'Property_Sets'] as const;
+
+const PROPERTY_SET_METADATA_KEYS = new Set([
+  'type',
+  'Type',
+  'id',
+  'ID',
+  'expressID',
+  'ExpressID',
+  'expressId',
+  'globalId',
+  'GlobalId',
+  'GlobalID',
+  'guid',
+  'Guid',
+  'GUID',
+  '_t',
+  '_type',
+  '_id',
+  '_guid',
+]);
+
 const isIfcPropertySet = (value: any): boolean => {
   if (!value || typeof value !== 'object') return false;
   const typeField = typeof value.type === 'string' ? value.type : typeof value.Type === 'string' ? value.Type : undefined;
@@ -481,7 +503,7 @@ const extractPropertySetRows = (pset: Record<string, any>, rawName: string, uniq
       searchText: searchPieces.join(' ').trim(),
       rawPsetName: rawName,
       rawPropertyName: rawPropertyName,
-      rawValue: property,
+      rawValue: (property as any).__rawValue ?? property,
     });
   });
 
@@ -495,6 +517,152 @@ const collectIfcPropertySetRows = (root: any): PropertyRow[] => {
   const visited = new WeakSet<object>();
   const psetCounters = new Map<string, number>();
 
+  type PropertySetMeta = { rawName: string; friendlyName: string; uniqueKey: string };
+
+  const makePropertySetMeta = (rawNameCandidate: any): PropertySetMeta => {
+    let rawName: string | undefined;
+    if (typeof rawNameCandidate === 'string') {
+      const trimmed = rawNameCandidate.trim();
+      if (trimmed.length) rawName = trimmed;
+    }
+    if (!rawName && rawNameCandidate && typeof rawNameCandidate === 'object') {
+      rawName =
+        readName(rawNameCandidate) ??
+        (typeof (rawNameCandidate as any).Name === 'string' ? (rawNameCandidate as any).Name : undefined) ??
+        (typeof (rawNameCandidate as any).id === 'string' ? (rawNameCandidate as any).id : undefined);
+    }
+    if (!rawName || !rawName.length) rawName = 'Property Set';
+    const friendlyName = prettifyLabel(rawName) || rawName;
+    const base = sanitizeKey(rawName) || 'property-set';
+    const occurrence = (psetCounters.get(base) ?? 0) + 1;
+    psetCounters.set(base, occurrence);
+    return { rawName, friendlyName, uniqueKey: `${base}-${occurrence}` };
+  };
+
+  const ensureSingleValue = (propertyName: string, rawValue: any, index: number) => {
+    const fallback = `Property ${index + 1}`;
+    const effectiveName = propertyName?.trim?.() ? propertyName.trim() : fallback;
+    if (isIfcPropertySingleValue(rawValue)) {
+      const copy = { ...(rawValue as Record<string, any>) };
+      if (copy.Name == null && copy.PropertyName == null) {
+        copy.Name = effectiveName;
+      }
+      if (copy.PropertyName == null) {
+        copy.PropertyName = copy.Name ?? effectiveName;
+      }
+      if (copy.__rawValue == null) {
+        copy.__rawValue = rawValue;
+      }
+      return copy;
+    }
+    if (rawValue && typeof rawValue === 'object') {
+      const clone = { ...(rawValue as Record<string, any>) };
+      if (clone.Name == null && clone.PropertyName == null) {
+        clone.Name = effectiveName;
+      }
+      if (clone.PropertyName == null) {
+        clone.PropertyName = clone.Name ?? effectiveName;
+      }
+      if (clone.type == null && clone.Type == null) {
+        clone.type = 'IFCPROPERTYSINGLEVALUE';
+      }
+      if (!('NominalValue' in clone) && !('nominalValue' in clone) && !('Value' in clone) && !('value' in clone)) {
+        clone.NominalValue = rawValue;
+      }
+      clone.__rawValue = rawValue;
+      return clone;
+    }
+    return {
+      type: 'IFCPROPERTYSINGLEVALUE',
+      Name: effectiveName,
+      PropertyName: effectiveName,
+      NominalValue: rawValue,
+      __rawValue: rawValue,
+    };
+  };
+
+  const buildSyntheticPropertySet = (rawName: string, source: any) => {
+    const properties: any[] = [];
+    const pushProperty = (candidateName: any, value: any) => {
+      const fallback = `Property ${properties.length + 1}`;
+      const rawPropertyName =
+        (typeof candidateName === 'string' && candidateName.trim().length ? candidateName.trim() : undefined) ??
+        readName(candidateName) ??
+        (typeof candidateName?.Name === 'string' ? candidateName.Name : undefined) ??
+        (typeof candidateName?.PropertyName === 'string' ? candidateName.PropertyName : undefined) ??
+        fallback;
+      properties.push(ensureSingleValue(rawPropertyName, value, properties.length));
+    };
+
+    if (source && typeof source === 'object') {
+      for (const key of IFC_PROPERTY_COLLECTION_KEYS) {
+        const collection = (source as any)[key];
+        if (Array.isArray(collection) && collection.length) {
+          collection.forEach((entry) => pushProperty(entry, entry));
+        }
+      }
+    }
+
+    if (!properties.length) {
+      if (Array.isArray(source)) {
+        source.forEach((entry) => pushProperty(entry, entry));
+      } else if (source && typeof source === 'object') {
+        for (const [propKey, propValue] of Object.entries(source as Record<string, any>)) {
+          if (propValue == null) continue;
+          if (PROPERTY_SET_METADATA_KEYS.has(propKey)) continue;
+          if (IFC_PROPERTY_COLLECTION_KEYS.includes(propKey as any)) continue;
+          if (PROPERTY_SET_CONTAINER_KEYS.includes(propKey as any)) continue;
+          pushProperty(propKey, propValue);
+        }
+      } else if (source != null) {
+        pushProperty(undefined, source);
+      }
+    }
+
+    return {
+      type: 'IFCPROPERTYSET',
+      Name: rawName,
+      HasProperties: properties,
+    };
+  };
+
+  const emitPropertySetRows = (meta: PropertySetMeta, candidate: any) => {
+    const propertySet = candidate && typeof candidate === 'object' ? candidate : {};
+    const extracted = extractPropertySetRows(propertySet as Record<string, any>, meta.rawName, meta.uniqueKey);
+    if (extracted.length) {
+      rows.push(...extracted);
+    }
+  };
+
+  const processDeclarativeContainer = (container: any) => {
+    if (!container || typeof container !== 'object') return;
+    if (visited.has(container)) return;
+    visited.add(container as object);
+
+    if (Array.isArray(container)) {
+      container.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') return;
+        const meta = makePropertySetMeta(entry);
+        const target = isIfcPropertySet(entry) ? entry : buildSyntheticPropertySet(meta.rawName, entry);
+        emitPropertySetRows(meta, target);
+        if (target && typeof target === 'object') {
+          visited.add(target);
+        }
+      });
+      return;
+    }
+
+    for (const [psetName, rawValue] of Object.entries(container as Record<string, any>)) {
+      if (rawValue == null) continue;
+      const meta = makePropertySetMeta(psetName);
+      const target = isIfcPropertySet(rawValue) ? rawValue : buildSyntheticPropertySet(meta.rawName, rawValue);
+      emitPropertySetRows(meta, target);
+      if (rawValue && typeof rawValue === 'object') {
+        visited.add(rawValue);
+      }
+    }
+  };
+
   const traverse = (value: any) => {
     if (!value || typeof value !== 'object') return;
     if (visited.has(value)) return;
@@ -505,22 +673,15 @@ const collectIfcPropertySetRows = (root: any): PropertyRow[] => {
       return;
     }
 
+    for (const key of PROPERTY_SET_CONTAINER_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        processDeclarativeContainer((value as Record<string, any>)[key]);
+      }
+    }
+
     if (isIfcPropertySet(value)) {
-      const rawNameCandidate =
-        readName(value) ??
-        (typeof (value as any).GlobalId === 'string' ? (value as any).GlobalId : undefined) ??
-        (typeof (value as any).GlobalID === 'string' ? (value as any).GlobalID : undefined) ??
-        (typeof (value as any).id === 'string' ? (value as any).id : undefined) ??
-        'Property Set';
-
-      const rawName = typeof rawNameCandidate === 'string' ? rawNameCandidate.trim() : String(rawNameCandidate ?? '');
-      const effectiveName = rawName.length ? rawName : 'Property Set';
-      const psetKeyBase = sanitizeKey(effectiveName) || 'property-set';
-      const occurrence = (psetCounters.get(psetKeyBase) ?? 0) + 1;
-      psetCounters.set(psetKeyBase, occurrence);
-      const uniquePsetKey = `${psetKeyBase}-${occurrence}`;
-
-      rows.push(...extractPropertySetRows(value as Record<string, any>, effectiveName, uniquePsetKey));
+      const meta = makePropertySetMeta(value);
+      emitPropertySetRows(meta, value);
     }
 
     Object.values(value as Record<string, any>).forEach((child) => {
@@ -532,14 +693,64 @@ const collectIfcPropertySetRows = (root: any): PropertyRow[] => {
   return rows;
 };
 
+const FRAGMENTS_ITEM_DATA_OPTIONS: Record<string, any> = {
+  attributesDefault: true,
+  relations: {
+    IsDefinedBy: {
+      attributes: true,
+      relations: true,
+    },
+  },
+};
+
+const IDS_NON_ELEMENT_CLASS_PREFIXES = [
+  'ifcproperty',
+  'ifcquantity',
+  'ifcphysicalsimplequantity',
+  'ifcprofile',
+  'ifcmaterial',
+  'ifcreldefines',
+  'ifcstyleditem',
+];
+
+const isLikelyNonElementForIds = (ifcClass: string, candidate: any): boolean => {
+  const normalizedClass = typeof ifcClass === 'string' ? ifcClass.trim().toLowerCase() : '';
+  if (normalizedClass && IDS_NON_ELEMENT_CLASS_PREFIXES.some((prefix) => normalizedClass.startsWith(prefix))) {
+    return true;
+  }
+
+  if (candidate && typeof candidate === 'object') {
+    const categoryNominal = extractNominalValue((candidate as any)._category ?? (candidate as any).category ?? (candidate as any).Category ?? null);
+    const normalizedCategory = typeof categoryNominal === 'string' ? categoryNominal.trim().toLowerCase() : '';
+    if (normalizedCategory && IDS_NON_ELEMENT_CLASS_PREFIXES.some((prefix) => normalizedCategory.startsWith(prefix))) {
+      return true;
+    }
+
+    const hasNominalValue =
+      ((candidate as any).NominalValue != null || (candidate as any).nominalValue != null) &&
+      ((candidate as any).Name != null || (candidate as any).PropertyName != null);
+    if (hasNominalValue && normalizedClass.includes('property')) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
 const FAVORITES_STORAGE_KEY = 'fragmentsViewer.favoritePropertyPaths';
 const MAX_DISPLAY_PROPERTY_ROWS = 200;
 const MAX_SEARCH_RESULTS = 200;
 
 const readName = (value: any): string | undefined => {
   if (!value || typeof value !== 'object') return undefined;
-  const primary = typeof value.Name === 'string' ? value.Name : undefined;
-  const secondary = typeof (value as any).name === 'string' ? (value as any).name : undefined;
+  let primary: string | undefined;
+  let secondary: string | undefined;
+  // support wrapped Name objects like { value: '...' } or { Value: ... }
+  if (typeof value.Name === 'string') primary = value.Name;
+  else if (value.Name && typeof value.Name === 'object') primary = extractNominalValue(value.Name) || undefined;
+
+  if (typeof (value as any).name === 'string') secondary = (value as any).name;
+  else if ((value as any).name && typeof (value as any).name === 'object') secondary = extractNominalValue((value as any).name) || undefined;
   const name = primary ?? secondary;
   if (!name) return undefined;
   const trimmed = name.trim();
@@ -715,6 +926,199 @@ const App: React.FC = () => {
   const workerUrlRef = useRef<string | null>(null);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [models, setModels] = useState<{ id: string; label: string }[]>([]);
+  // Dev helpers
+  const [devDumpInProgress, setDevDumpInProgress] = useState(false);
+  const [devDumpSampleOnly, setDevDumpSampleOnly] = useState<number | null>(50);
+
+  const dumpModelRawData = useCallback(
+    async (modelId?: string, opts?: { sample?: number; chunkSize?: number }) => {
+      if (!import.meta.env.DEV) {
+        console.warn('dumpModelRawData is dev-only.');
+        return;
+      }
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.warn('Fragments manager not ready');
+        return;
+      }
+      const id = modelId ?? currentModelIdRef.current;
+      if (!id) {
+        console.warn('No modelId provided and no current model loaded');
+        return;
+      }
+      const model = fragments.list.get(id);
+      if (!model) {
+        console.warn('Model not found in fragments list', id);
+        return;
+      }
+      const chunkSize = Math.max(8, Math.floor(opts?.chunkSize ?? 128));
+      const sample = typeof opts?.sample === 'number' ? opts.sample : devDumpSampleOnly ?? undefined;
+      setDevDumpInProgress(true);
+      try {
+        let localIds: number[] = [];
+        try {
+          const fetched = await model.getLocalIds();
+          if (Array.isArray(fetched)) localIds = fetched;
+          else if (fetched && typeof (fetched as any)[Symbol.iterator] === 'function') localIds = Array.from(fetched as Iterable<number>);
+        } catch (err) {
+          console.warn('Failed to enumerate local IDs for dump', err);
+          return;
+        }
+        if (!localIds.length) {
+          console.info('Model has no local IDs to dump.');
+          return;
+        }
+        const toProcess = typeof sample === 'number' && sample > 0 ? localIds.slice(0, sample) : localIds.slice();
+        const out: Array<{ localId: number; data: any }> = [];
+        for (let offset = 0; offset < toProcess.length; offset += chunkSize) {
+          const chunk = toProcess.slice(offset, offset + chunkSize);
+          let batch: any[] = [];
+          try {
+            batch = await model.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
+          } catch (err) {
+            console.warn(`Failed to fetch items data for chunk starting at ${chunk[0]}`, err);
+            chunk.forEach((lId, idx) => out.push({ localId: lId, data: batch?.[idx] ?? null }));
+            continue;
+          }
+          chunk.forEach((localId, i) => out.push({ localId, data: batch?.[i] ?? null }));
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        console.info(`Dumped ${out.length} items for model ${id} (sample=${sample ?? 'all'})`);
+        const payload = {
+          modelId: id,
+          label: models.find((m) => m.id === id)?.label ?? id,
+          collectedAt: new Date().toISOString(),
+          itemCount: out.length,
+          sampleLimit: sample ?? null,
+          chunkSize,
+          items: out,
+        };
+        try {
+          const json = JSON.stringify(payload, null, 2);
+          console.log('Raw model dump (first 2000 chars):', json.slice(0, 2000));
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          const safeLabel = (payload.label ?? id).replace(/[^\w\-]+/g, '_').slice(0, 40);
+          a.download = `raw-frag-${safeLabel}-${id}-${Date.now()}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          console.warn('Failed to prepare/download dump', err);
+        }
+      } finally {
+        setDevDumpInProgress(false);
+      }
+    },
+    [models]
+  );
+
+  const inspectModelProperties = useCallback(
+    async (modelId?: string, sampleSize = 50, chunkSize = 128) => {
+      if (!import.meta.env.DEV) return;
+      const fr = fragmentsRef.current;
+      if (!fr) {
+        console.warn('inspectModelProperties: fragments manager not ready');
+        return;
+      }
+      const id = modelId ?? currentModelIdRef.current;
+      if (!id) {
+        console.warn('inspectModelProperties: no model id');
+        return;
+      }
+      const model = fr.list.get(id);
+      if (!model) {
+        console.warn('inspectModelProperties: model not found', id);
+        return;
+      }
+
+      console.groupCollapsed(`inspectModelProperties: model=${id}`);
+      try {
+        let localIds: number[] = [];
+        try {
+          const l = await model.getLocalIds();
+          localIds = Array.isArray(l) ? l : Array.from(l as Iterable<number>);
+        } catch (err) {
+          console.warn('inspectModelProperties: failed to getLocalIds', err);
+          console.groupEnd();
+          return;
+        }
+        if (!localIds.length) {
+          console.warn('inspectModelProperties: no localIds found');
+          console.groupEnd();
+          return;
+        }
+
+        const sample = localIds.slice(0, Math.min(sampleSize, localIds.length));
+        const stats: Record<string, number> = {};
+        const keyCounts: Record<string, number> = {};
+        const examples: Array<{ localId: number; keys: string[]; foundShapes: string[]; snippet: any }> = [];
+
+        for (let offset = 0; offset < sample.length; offset += chunkSize) {
+          const chunk = sample.slice(offset, offset + chunkSize);
+          let batch: any[] = [];
+          try {
+            batch = await model.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
+          } catch (err) {
+            console.warn('inspectModelProperties: getItemsData chunk failed', err);
+            continue;
+          }
+          chunk.forEach((localId, i) => {
+            const item = batch?.[i] ?? null;
+            if (!item) {
+              stats.missing = (stats.missing ?? 0) + 1;
+              return;
+            }
+            const keys = Object.keys(item);
+            keys.forEach((k) => (keyCounts[k] = (keyCounts[k] || 0) + 1));
+            const foundShapes: string[] = [];
+            if (item.HasProperties || item.Properties || item.PropertySets || item.psets) foundShapes.push('HasProperties/Properties/PropertySets/psets');
+            const hasSingleValue =
+              keys.some((k) => {
+                const v = item[k];
+                if (!v) return false;
+                if (typeof v === 'object' && (v.Name || v.PropertyName) && (v.NominalValue || v.value || v.Value)) return true;
+                if (Array.isArray(v) && v.length && typeof v[0] === 'object') {
+                  return v.some((x: any) => x && (x.PropertyName || x.Name) && (x.NominalValue || x.value || x.Value));
+                }
+                return false;
+              }) || false;
+            if (hasSingleValue) foundShapes.push('IfcPropertySingleValue-like');
+            const psetKeys = keys.filter((k) => /^pset|^Pset|PropertySet/i.test(k));
+            if (psetKeys.length) foundShapes.push(`psetKeys:${psetKeys.slice(0, 3).join(',')}`);
+            if (examples.length < 6) {
+              examples.push({
+                localId,
+                keys,
+                foundShapes,
+                snippet: Object.fromEntries(keys.slice(0, 10).map((k) => [k, item[k]])),
+              });
+            }
+            foundShapes.forEach((s) => (stats[s] = (stats[s] || 0) + 1));
+          });
+          await new Promise((r) => setTimeout(r, 0));
+        }
+
+        console.log('inspectModelProperties keyCounts (top 20):', Object.entries(keyCounts).sort((a, b) => b[1] - a[1]).slice(0, 20));
+        console.log('inspectModelProperties stats:', stats);
+        console.log('inspectModelProperties examples (up to 6):', examples);
+        const foundAnyPset = Object.keys(stats).some((k) => /pset|HasProperties|PropertySet|IfcPropertySingleValue/i.test(k));
+        if (!foundAnyPset) {
+          console.warn(
+            'inspectModelProperties: no property-set shapes detected in sample. This suggests the IFC→.frag conversion did not export Psets for this model. Check conversion options or use an exporter that includes property sets (web-ifc flags / exporter settings).'
+          );
+        }
+      } catch (err) {
+        console.error('inspectModelProperties: unexpected error', err);
+      } finally {
+        console.groupEnd();
+      }
+    },
+    []
+  );
   const [selectedItems, setSelectedItems] = useState<Selection[]>([]);
   const [properties, setProperties] = useState<Record<string, any> | null>(null);
   const [isExplorerOpen, setIsExplorerOpen] = useState(true);
@@ -921,7 +1325,7 @@ const App: React.FC = () => {
         const chunk = localIds.slice(index, index + chunkSize);
         let batch: any[] = [];
         try {
-          batch = await record.getItemsData(chunk);
+          batch = await record.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
         } catch (error) {
           console.warn(`Failed to fetch items data for model ${modelId} chunk starting at ${chunk[0]}`, error);
           continue;
@@ -1111,6 +1515,10 @@ const App: React.FC = () => {
     flattened.GlobalId = globalId;
     flattened.ifcClass = ifcClass;
     attributes.ifcClass = ifcClass;
+    attributes.GlobalId = globalId;
+    flattened['Attributes.GlobalId'] = globalId;
+    flattened['Attributes.IfcClass'] = ifcClass;
+  flattened['Attributes.ifcClass'] = ifcClass;
 
     const name = readName(data);
     if (name) {
@@ -1128,6 +1536,26 @@ const App: React.FC = () => {
     if (typeValue) {
       attributes.Type = typeValue;
       flattened['Attributes.Type'] = typeValue;
+    }
+
+    // If converter left useful values as wrapped top-level fields (e.g. Name: { value: '...' }, _guid: { value: '...' })
+    // extract nominal values and put them into Attributes and flattened map so the UI and IDS can see them.
+    for (const [k, v] of Object.entries(data ?? {})) {
+      if (v == null) continue;
+      if (typeof v !== 'object' || Array.isArray(v)) continue;
+      const nominal = extractNominalValue(v);
+      if (!nominal) continue;
+      const cleaned = String(k).replace(/^_+/, '');
+      const attrKey = `Attributes.${prettifyLabel(cleaned)}`;
+      if (!(attrKey in flattened)) flattened[attrKey] = nominal;
+      if (!(cleaned in attributes)) attributes[cleaned] = nominal;
+      if (/guid|globalid|_guid/i.test(k)) {
+        const candidate = String(nominal).trim();
+        if (candidate && !flattened.GlobalId) {
+          flattened.GlobalId = candidate;
+          attributes.GlobalId = candidate;
+        }
+      }
     }
 
     return { flattened, psets, attributes };
@@ -1183,7 +1611,7 @@ const App: React.FC = () => {
           const chunk = localIds.slice(index, index + chunkSize);
           let batch: any[] = [];
           try {
-            batch = await model.getItemsData(chunk);
+            batch = await model.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
           } catch (error) {
             console.warn(`IDS cache: failed to fetch items data for model ${modelId}`, error);
             continue;
@@ -1192,11 +1620,23 @@ const App: React.FC = () => {
           batch.forEach((itemData, position) => {
             if (!itemData) return;
             const localId = chunk[position];
+            const ifcClass = extractIfcClassFromData(itemData);
             const globalIdCandidate =
               (typeof itemData.GlobalId === 'string' && itemData.GlobalId.trim()) ||
               (typeof itemData.GlobalID === 'string' && itemData.GlobalID.trim()) ||
               findFirstValueByKeywords(itemData, ['globalid', 'global id', 'guid']);
             if (!globalIdCandidate) {
+              if (isLikelyNonElementForIds(ifcClass, itemData)) {
+                if (import.meta.env.DEV) {
+                  console.debug('IDS cache: skipping non-element record without GlobalId', {
+                    modelId,
+                    localId,
+                    ifcClass,
+                    category: extractNominalValue((itemData as any)?._category ?? null),
+                  });
+                }
+                return;
+              }
               console.warn('IDS cache: missing GlobalId for localId', {
                 modelId,
                 localId,
@@ -1207,7 +1647,6 @@ const App: React.FC = () => {
             const globalId = globalIdCandidate.trim();
             if (!globalId.length || records.has(globalId)) return;
 
-            const ifcClass = extractIfcClassFromData(itemData);
             const { flattened, psets, attributes } = flattenPropertiesForIds(itemData, globalId, ifcClass);
             const element: ElementData = { GlobalId: globalId, ifcClass, properties: flattened };
 
@@ -1536,7 +1975,7 @@ const App: React.FC = () => {
         return;
       }
       try {
-        const [data] = await model.getItemsData([primary.localId]);
+  const [data] = await model.getItemsData([primary.localId], FRAGMENTS_ITEM_DATA_OPTIONS);
         updateSelectedProperties(data || null);
       } catch (error) {
         console.warn('Failed to fetch properties for selection', error);
@@ -1749,7 +2188,6 @@ const App: React.FC = () => {
       if (!modelsListElementRef.current.dataset.initialized) {
         modelsListElementRef.current.dataset.initialized = 'true';
         modelsListElementRef.current.style.width = '100%';
-        modelsListElementRef.current.style.maxHeight = '200px';
       }
     }
 
@@ -1989,6 +2427,22 @@ const App: React.FC = () => {
     setIsExplorerMinimized((prev) => !prev);
   }, []);
 
+  const modelsSectionMaxHeight = useMemo(
+    () => Math.min(360, Math.max(180, explorerSize.height * 0.45)),
+    [explorerSize.height]
+  );
+
+  const openDetailSectionCount = Number(!isSelectionPropertiesCollapsed) + Number(!isModelTreeCollapsed);
+  const isModelsSectionFlexible = !isModelsSectionCollapsed && openDetailSectionCount === 0;
+
+  useEffect(() => {
+    const element = modelsListElementRef.current;
+    if (!element) return;
+    element.style.width = '100%';
+    element.style.maxHeight = isModelsSectionFlexible ? '100%' : `${modelsSectionMaxHeight}px`;
+    element.style.height = isModelsSectionFlexible ? '100%' : 'auto';
+  }, [isModelsSectionFlexible, modelsSectionMaxHeight, modelsSignature]);
+
   const handleAISelection = useCallback(async (command: SelectionCommand) => {
     const normalizeFilter = (source: Record<string, any> | undefined) => {
       type Term = { type: 'field'; key: string; value: string } | { type: 'text'; value: string };
@@ -2105,7 +2559,7 @@ const App: React.FC = () => {
         const chunk = localIds.slice(offset, offset + chunkSize);
         let batch: any[] = [];
         try {
-          batch = await model.getItemsData(chunk);
+          batch = await model.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
         } catch (err) {
           console.warn('Failed to retrieve property batch for AI selection', err);
           continue;
@@ -2211,7 +2665,7 @@ const App: React.FC = () => {
       const primary = matches[0];
       const firstId = Array.from(primary.matched)[0];
       if (firstId !== undefined) {
-        const [data] = await primary.model.getItemsData([firstId]);
+  const [data] = await primary.model.getItemsData([firstId], FRAGMENTS_ITEM_DATA_OPTIONS);
         if (requestId === aiSelectionSeqRef.current) {
           updateSelectedProperties(data || null);
         }
@@ -2336,7 +2790,7 @@ const App: React.FC = () => {
           const model = fr.list.get(selection.modelId);
           if (model) {
             try {
-              const [data] = await model.getItemsData([selection.localId]);
+                const [data] = await model.getItemsData([selection.localId], FRAGMENTS_ITEM_DATA_OPTIONS);
               snapshot = data || null;
             } catch (err) {
               console.warn('Failed to fetch properties for AI context (multi)', err);
@@ -2387,7 +2841,7 @@ const App: React.FC = () => {
               const chunk = localIds.slice(offset, offset + chunkSize);
               let batch: any[] = [];
               try {
-                batch = await record.getItemsData(chunk);
+                batch = await record.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
               } catch (err) {
                 const start = chunk[0];
                 const end = chunk[chunk.length - 1];
@@ -2648,7 +3102,7 @@ const App: React.FC = () => {
         setSelectedItems(newSelection);
         handleExplorerOpen();
         try {
-          const [data] = await best.model.getItemsData([best.localId]);
+          const [data] = await best.model.getItemsData([best.localId], FRAGMENTS_ITEM_DATA_OPTIONS);
           updateSelectedProperties(data || null);
         } catch {}
       }
@@ -2872,6 +3326,21 @@ const App: React.FC = () => {
                   <Button variant="contained" size="small" onClick={() => fileInputRef.current?.click()} disabled={!componentsReady}>
                     Open IFC / FRAG
                   </Button>
+                    {import.meta.env.DEV && (
+                      <Tooltip title="Dump raw .frag JSON (dev only)">
+                        <span>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            color="inherit"
+                            onClick={() => dumpModelRawData(currentModelIdRef.current ?? undefined)}
+                            disabled={devDumpInProgress || !componentsReady || !models.length}
+                          >
+                            {devDumpInProgress ? 'Dumping…' : 'Dump Raw JSON'}
+                          </Button>
+                        </span>
+                      </Tooltip>
+                    )}
                   <Typography variant="caption" color="text.secondary">
                                  </Typography>
                   <input
@@ -2883,17 +3352,47 @@ const App: React.FC = () => {
                   />
                 </Box>
 
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflow: 'hidden' }}>
+                <Box
+                  sx={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 1,
+                    overflow: 'hidden',
+                    flexGrow: isModelsSectionFlexible ? 1 : 0,
+                    flexShrink: isModelsSectionFlexible ? 1 : 0,
+                    flexBasis: isModelsSectionFlexible ? 0 : 'auto',
+                    minHeight: 0,
+                  }}
+                >
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <Typography variant="subtitle2">Loaded Models</Typography>
                     <IconButton size="small" onClick={() => setIsModelsSectionCollapsed((prev) => !prev)}>
                       {isModelsSectionCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
                     </IconButton>
                   </Box>
-                  <Collapse in={!isModelsSectionCollapsed} timeout="auto">
+                  <Collapse
+                    in={!isModelsSectionCollapsed}
+                    timeout="auto"
+                    sx={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      flex: isModelsSectionFlexible ? '1 1 0' : '0 0 auto',
+                      maxHeight: isModelsSectionFlexible ? '100%' : `${modelsSectionMaxHeight}px`,
+                      minHeight: 0,
+                    }}
+                  >
                     <Box
                       ref={modelsListContainerRef}
-                      sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1, overflow: 'hidden' }}
+                      sx={{
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        borderRadius: 1,
+                        p: 1,
+                        overflowY: 'auto',
+                        flex: isModelsSectionFlexible ? '1 1 0' : '0 0 auto',
+                        maxHeight: isModelsSectionFlexible ? '100%' : `${modelsSectionMaxHeight}px`,
+                        minHeight: 0,
+                      }}
                     >
                       {!componentsReady && (
                         <Typography variant="body2" color="text.secondary">Initializing components…</Typography>
@@ -2901,245 +3400,323 @@ const App: React.FC = () => {
                     </Box>
                   </Collapse>
                 </Box>
-                
                 <Box
-                  sx={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 1.25,
-                    overflow: 'hidden',
-                    borderRadius: 1.5,
-                    border: '1px solid',
-                    borderColor: 'rgba(229, 57, 53, 0.45)',
-                    bgcolor: 'rgba(229, 57, 53, 0.08)',
-                    p: 1.5,
-                  }}
+                  sx={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minHeight: 0 }}
                 >
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                    <Typography variant="subtitle2">Selection Properties</Typography>
-                    <IconButton size="small" onClick={() => setIsSelectionPropertiesCollapsed((prev) => !prev)}>
-                      {isSelectionPropertiesCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
-                    </IconButton>
-                  </Box>
-                  <Collapse in={!isSelectionPropertiesCollapsed} timeout="auto">
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, minHeight: 0 }}>
-                      <Tabs
-                        value={selectedPropertyTab}
-                        onChange={(_, value) => setSelectedPropertyTab(value as PropertyTabId)}
-                        variant="scrollable"
-                        allowScrollButtonsMobile
-                        sx={{
-                          minHeight: 'auto',
-                          '.MuiTabs-flexContainer': {
-                            gap: 0.5,
-                          },
-                          '.MuiTab-root': {
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 1.25,
+                      overflow: 'hidden',
+                      borderRadius: 1.5,
+                      border: '1px solid',
+                      borderColor: 'rgba(229, 57, 53, 0.45)',
+                      bgcolor: 'rgba(229, 57, 53, 0.08)',
+                      p: 1.5,
+                      flexGrow: isSelectionPropertiesCollapsed ? 0 : 1,
+                      flexShrink: isSelectionPropertiesCollapsed ? 0 : 1,
+                      flexBasis: 'auto',
+                      minHeight: 0,
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                      <Typography variant="subtitle2">Selection Properties</Typography>
+                      <IconButton size="small" onClick={() => setIsSelectionPropertiesCollapsed((prev) => !prev)}>
+                        {isSelectionPropertiesCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
+                      </IconButton>
+                    </Box>
+                    <Collapse
+                      in={!isSelectionPropertiesCollapsed}
+                      timeout="auto"
+                      sx={{
+                        flex: isSelectionPropertiesCollapsed ? '0 0 auto' : '1 1 0',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        minHeight: 0,
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1, minHeight: 0 }}>
+                        <Tabs
+                          value={selectedPropertyTab}
+                          onChange={(_, value) => setSelectedPropertyTab(value as PropertyTabId)}
+                          variant="scrollable"
+                          allowScrollButtonsMobile
+                          sx={{
                             minHeight: 'auto',
-                            py: 0.75,
-                          },
-                        }}
-                      >
-                        <Tab value="favorites" label={`Favourites (${favoriteRows.length})`} />
-                        <Tab value="all" label={`All (${propertyRows.length})`} />
-                      </Tabs>
+                            flexShrink: 0,
+                            '.MuiTabs-flexContainer': {
+                              gap: 0.5,
+                            },
+                            '.MuiTab-root': {
+                              minHeight: 'auto',
+                              py: 0.75,
+                            },
+                          }}
+                        >
+                          <Tab value="favorites" label={`Favourites (${favoriteRows.length})`} />
+                          <Tab value="all" label={`All (${propertyRows.length})`} />
+                        </Tabs>
 
-                      <Box
-                        role="tabpanel"
-                        hidden={selectedPropertyTab !== 'favorites'}
-                        sx={{
-                          display: selectedPropertyTab === 'favorites' ? 'flex' : 'none',
-                          flexDirection: 'column',
-                          gap: 1,
-                        }}
-                      >
-                        {favoriteRows.length ? (
-                          <Paper
-                            variant="outlined"
-                            sx={{
-                              p: 1,
-                              maxHeight: 220,
-                              overflowY: 'auto',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: 0.75,
-                            }}
-                          >
-                            {favoriteRows.map(renderPropertyRow)}
-                          </Paper>
-                        ) : (
-                          <Paper variant="outlined" sx={{ p: 1 }}>
-                            <Typography variant="body2" color="text.secondary">
-                              {favoritePropertyPaths.length
-                                ? 'The current selection does not expose any of your favourite properties yet. Try selecting another item.'
-                                : 'Mark properties as favourites from the All tab to pin them here.'}
-                            </Typography>
-                          </Paper>
-                        )}
-                        {missingFavoriteCount > 0 && favoritePropertyPaths.length > 0 && (
-                          <Alert severity="info" variant="outlined">
-                            {missingFavoriteCount === 1
-                              ? '1 favourite property is not available for this selection.'
-                              : `${missingFavoriteCount} favourite properties are not available for this selection.`}
-                          </Alert>
-                        )}
-                      </Box>
-
-                      <Box
-                        role="tabpanel"
-                        hidden={selectedPropertyTab !== 'all'}
-                        sx={{
-                          display: selectedPropertyTab === 'all' ? 'flex' : 'none',
-                          flexDirection: 'column',
-                          gap: 1,
-                          minHeight: 0,
-                        }}
-                      >
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <TextField
-                            size="small"
-                            fullWidth
-                            value={selectionSearch}
-                            onChange={(event) => setSelectionSearch(event.target.value)}
-                            placeholder="Search properties…"
-                            disabled={!propertyRows.length}
-                          />
-                          <Tooltip title="Export properties">
-                            <span>
-                              <Button
-                                variant="outlined"
-                                size="small"
-                                startIcon={<FileDownloadIcon />}
-                                onClick={handleOpenExportDialog}
-                                disabled={!propertyRows.length && !models.length}
-                              >
-                                Export
-                              </Button>
-                            </span>
-                          </Tooltip>
-                        </Box>
-
-                        {!propertyRows.length ? (
-                          <Paper variant="outlined" sx={{ p: 1 }}>
-                            <Typography variant="body2" color="text.secondary">
-                              Select an element in the viewer to view its Property Sets / NV_BIM / … breakdown.
-                            </Typography>
-                          </Paper>
-                        ) : hasSelectionSearch ? (
-                          matchedPropertyRows.length ? (
+                        <Box
+                          role="tabpanel"
+                          hidden={selectedPropertyTab !== 'favorites'}
+                          sx={{
+                            display: selectedPropertyTab === 'favorites' ? 'flex' : 'none',
+                            flexDirection: 'column',
+                            gap: 1,
+                            flex: selectedPropertyTab === 'favorites' ? 1 : 0,
+                            minHeight: selectedPropertyTab === 'favorites' ? 0 : 'auto',
+                            overflow: 'hidden',
+                          }}
+                        >
+                          {favoriteRows.length ? (
                             <Paper
                               variant="outlined"
                               sx={{
-                                maxHeight: 200,
-                                overflowY: 'auto',
                                 p: 1,
                                 display: 'flex',
                                 flexDirection: 'column',
                                 gap: 0.75,
+                                flex: 1,
+                                minHeight: 0,
+                                overflowY: 'auto',
+                                height: '100%',
                               }}
                             >
-                              {matchedPropertyRows.map(renderPropertyRow)}
+                              {favoriteRows.map(renderPropertyRow)}
                             </Paper>
                           ) : (
-                            <Paper variant="outlined" sx={{ p: 1 }}>
-                              <Typography variant="body2" color="text.secondary">
-                                {`No properties matched "${selectionSearchTerm}".`}
-                              </Typography>
-                            </Paper>
-                          )
-                        ) : (
-                          <React.Fragment>
                             <Paper
                               variant="outlined"
                               sx={{
-                                maxHeight: 240,
-                                overflowY: 'auto',
                                 p: 1,
+                                flex: 1,
                                 display: 'flex',
-                                flexDirection: 'column',
-                                gap: 0.75,
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                textAlign: 'center',
+                                height: '100%',
                               }}
                             >
-                              {limitedPropertyRows.map(renderPropertyRow)}
+                              <Typography variant="body2" color="text.secondary">
+                                {favoritePropertyPaths.length
+                                  ? 'The current selection does not expose any of your favourite properties yet. Try selecting another item.'
+                                  : 'Mark properties as favourites from the All tab to pin them here.'}
+                              </Typography>
                             </Paper>
-                            {truncatedPropertyCount > 0 && (
-                              <Alert severity="info" variant="outlined">
-                                {`Displaying the first ${limitedPropertyRows.length} properties. ${truncatedPropertyCount} more not shown.`}
-                              </Alert>
-                            )}
-                          </React.Fragment>
-                        )}
-                      </Box>
-                    </Box>
-                  </Collapse>
-                </Box>
+                          )}
+                          {missingFavoriteCount > 0 && favoritePropertyPaths.length > 0 && (
+                            <Alert severity="info" variant="outlined" sx={{ flexShrink: 0 }}>
+                              {missingFavoriteCount === 1
+                                ? '1 favourite property is not available for this selection.'
+                                : `${missingFavoriteCount} favourite properties are not available for this selection.`}
+                            </Alert>
+                          )}
+                        </Box>
 
-                <Box
-                  sx={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 1.25,
-                    overflow: 'hidden',
-                    borderRadius: 1.5,
-                    border: '1px solid',
-                    borderColor: 'rgba(255, 179, 0, 0.5)',
-                    bgcolor: 'rgba(255, 213, 79, 0.12)',
-                    p: 1.5,
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                    <Typography variant="subtitle2">Model Tree</Typography>
-                    <IconButton size="small" onClick={() => setIsModelTreeCollapsed((prev) => !prev)}>
-                      {isModelTreeCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
-                    </IconButton>
-                  </Box>
-                  <Collapse in={!isModelTreeCollapsed} timeout="auto">
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, minHeight: 0 }}>
-                      <TextField
-                        size="small"
-                        fullWidth
-                        value={modelTreeSearch}
-                        onChange={(event) => setModelTreeSearch(event.target.value)}
-                        placeholder="Search the model tree…"
-                        disabled={!models.length}
-                      />
-                      <Box
-                        sx={{
-                          position: 'relative',
-                          border: '1px solid',
-                          borderColor: 'divider',
-                          borderRadius: 1,
-                          minHeight: 240,
-                          maxHeight: 360,
-                          overflow: 'hidden',
-                          bgcolor: 'background.paper',
-                        }}
-                      >
                         <Box
-                          ref={modelTreeContainerRef}
-                          sx={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}
-                        />
-                        {(!componentsReady || !models.length) && (
-                          <Box
-                            sx={{
-                              position: 'absolute',
-                              inset: 0,
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              textAlign: 'center',
-                              px: 2,
-                            }}
-                          >
-                            <Typography variant="body2" color="text.secondary">
-                              {componentsReady
-                                ? 'Load a model to populate the full model tree.'
-                                : 'Viewer is initializing the model tree…'}
-                            </Typography>
+                          role="tabpanel"
+                          hidden={selectedPropertyTab !== 'all'}
+                          sx={{
+                            display: selectedPropertyTab === 'all' ? 'flex' : 'none',
+                            flexDirection: 'column',
+                            gap: 1,
+                            flex: selectedPropertyTab === 'all' ? 1 : 0,
+                            minHeight: 0,
+                            overflow: 'hidden',
+                          }}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+                            <TextField
+                              size="small"
+                              fullWidth
+                              value={selectionSearch}
+                              onChange={(event) => setSelectionSearch(event.target.value)}
+                              placeholder="Search properties…"
+                              disabled={!propertyRows.length}
+                            />
+                            <Tooltip title="Export properties">
+                              <span>
+                                <Button
+                                  variant="outlined"
+                                  size="small"
+                                  startIcon={<FileDownloadIcon />}
+                                  onClick={handleOpenExportDialog}
+                                  disabled={!propertyRows.length && !models.length}
+                                >
+                                  Export
+                                </Button>
+                              </span>
+                            </Tooltip>
                           </Box>
-                        )}
+
+                          {!propertyRows.length ? (
+                            <Paper
+                              variant="outlined"
+                              sx={{
+                                p: 1,
+                                flex: 1,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                textAlign: 'center',
+                              }}
+                            >
+                              <Typography variant="body2" color="text.secondary">
+                                Select an element in the viewer to view its Property Sets / NV_BIM / … breakdown.
+                              </Typography>
+                            </Paper>
+                          ) : hasSelectionSearch ? (
+                            matchedPropertyRows.length ? (
+                              <Paper
+                                variant="outlined"
+                                sx={{
+                                  flex: 1,
+                                  overflowY: 'auto',
+                                  p: 1,
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 0.75,
+                                  minHeight: 0,
+                                  height: '100%',
+                                }}
+                              >
+                                {matchedPropertyRows.map(renderPropertyRow)}
+                              </Paper>
+                            ) : (
+                              <Paper
+                                variant="outlined"
+                                sx={{
+                                  p: 1,
+                                  flex: 1,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  textAlign: 'center',
+                                  height: '100%',
+                                }}
+                              >
+                                <Typography variant="body2" color="text.secondary">
+                                  {`No properties matched "${selectionSearchTerm}".`}
+                                </Typography>
+                              </Paper>
+                            )
+                          ) : (
+                            <React.Fragment>
+                              <Paper
+                                variant="outlined"
+                                sx={{
+                                  flex: 1,
+                                  overflowY: 'auto',
+                                  p: 1,
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 0.75,
+                                  minHeight: 0,
+                                  height: '100%',
+                                }}
+                              >
+                                {limitedPropertyRows.map(renderPropertyRow)}
+                              </Paper>
+                              {truncatedPropertyCount > 0 && (
+                                <Alert severity="info" variant="outlined" sx={{ flexShrink: 0 }}>
+                                  {`Displaying the first ${limitedPropertyRows.length} properties. ${truncatedPropertyCount} more not shown.`}
+                                </Alert>
+                              )}
+                            </React.Fragment>
+                          )}
+                        </Box>
                       </Box>
+                    </Collapse>
+                  </Box>
+
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 1.25,
+                      overflow: 'hidden',
+                      borderRadius: 1.5,
+                      border: '1px solid',
+                      borderColor: 'rgba(255, 179, 0, 0.5)',
+                      bgcolor: 'rgba(255, 213, 79, 0.12)',
+                      p: 1.5,
+                      flexGrow: isModelTreeCollapsed ? 0 : 1,
+                      flexShrink: isModelTreeCollapsed ? 0 : 1,
+                      flexBasis: 'auto',
+                      minHeight: 0,
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                      <Typography variant="subtitle2">Model Tree</Typography>
+                      <IconButton size="small" onClick={() => setIsModelTreeCollapsed((prev) => !prev)}>
+                        {isModelTreeCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
+                      </IconButton>
                     </Box>
-                  </Collapse>
+                    <Collapse
+                      in={!isModelTreeCollapsed}
+                      timeout="auto"
+                      sx={{
+                        flex: isModelTreeCollapsed ? '0 0 auto' : '1 1 0',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        minHeight: 0,
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1, minHeight: 0 }}>
+                        <TextField
+                          size="small"
+                          fullWidth
+                          value={modelTreeSearch}
+                          onChange={(event) => setModelTreeSearch(event.target.value)}
+                          placeholder="Search the model tree…"
+                          disabled={!models.length}
+                          sx={{ flexShrink: 0 }}
+                        />
+                        <Box
+                          sx={{
+                            position: 'relative',
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 1,
+                            minHeight: 200,
+                            maxHeight: '100%',
+                            height: '100%',
+                            flex: 1,
+                            overflow: 'hidden',
+                            bgcolor: 'background.paper',
+                          }}
+                        >
+                          <Box
+                            ref={modelTreeContainerRef}
+                            sx={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}
+                          />
+                          {(!componentsReady || !models.length) && (
+                            <Box
+                              sx={{
+                                position: 'absolute',
+                                inset: 0,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                textAlign: 'center',
+                                px: 2,
+                              }}
+                            >
+                              <Typography variant="body2" color="text.secondary">
+                                {componentsReady
+                                  ? 'Load a model to populate the full model tree.'
+                                  : 'Viewer is initializing the model tree…'}
+                              </Typography>
+                            </Box>
+                          )}
+                        </Box>
+                      </Box>
+                    </Collapse>
+                  </Box>
                 </Box>
               </Box>
             )}

@@ -149,6 +149,28 @@ const normalizeIdsToken = (value: string): string => {
 
 const IFC_PROPERTY_COLLECTION_KEYS = ['HasProperties', 'hasProperties', 'Properties', 'properties'] as const;
 
+const PROPERTY_SET_CONTAINER_KEYS = ['psets', 'Psets', 'propertySets', 'PropertySets', 'property_sets', 'Property_Sets'] as const;
+
+const PROPERTY_SET_METADATA_KEYS = new Set([
+  'type',
+  'Type',
+  'id',
+  'ID',
+  'expressID',
+  'ExpressID',
+  'expressId',
+  'globalId',
+  'GlobalId',
+  'GlobalID',
+  'guid',
+  'Guid',
+  'GUID',
+  '_t',
+  '_type',
+  '_id',
+  '_guid',
+]);
+
 const isIfcPropertySet = (value: unknown): boolean => {
   if (!value || typeof value !== 'object') return false;
   const typed = value as Record<string, unknown>;
@@ -211,6 +233,174 @@ const collectIfcPropertySetRows = (root: unknown): PropertyRow[] => {
   const visited = new WeakSet<object>();
   const psetCounters = new Map<string, number>();
 
+  type PropertySetMeta = { rawName: string; friendlyName: string; uniqueKey: string };
+
+  const makePropertySetMeta = (rawNameCandidate: unknown): PropertySetMeta => {
+    let rawName: string | undefined;
+    if (typeof rawNameCandidate === 'string') {
+      const trimmed = rawNameCandidate.trim();
+      if (trimmed.length) rawName = trimmed;
+    }
+    if (!rawName && rawNameCandidate && typeof rawNameCandidate === 'object') {
+      const typed = rawNameCandidate as Record<string, unknown>;
+      const name = readName(rawNameCandidate) ?? (typeof typed.Name === 'string' ? typed.Name : undefined);
+      const alt = typeof typed.id === 'string' ? typed.id : undefined;
+      rawName = (name ?? alt) as string | undefined;
+    }
+    if (!rawName || !rawName.length) rawName = 'Property Set';
+    const friendlyName = prettifyLabel(rawName) || rawName;
+    const base = sanitizeKey(rawName) || 'property-set';
+    const occurrence = (psetCounters.get(base) ?? 0) + 1;
+    psetCounters.set(base, occurrence);
+    return { rawName, friendlyName, uniqueKey: `${base}-${occurrence}` };
+  };
+
+  const ensureSingleValue = (propertyName: string, rawValue: unknown, index: number): Record<string, unknown> => {
+    const fallback = `Property ${index + 1}`;
+    const effectiveName = propertyName && propertyName.trim().length ? propertyName.trim() : fallback;
+    if (isIfcPropertySingleValue(rawValue)) {
+      const source = rawValue as Record<string, unknown>;
+      const copy: Record<string, unknown> = { ...source };
+      if (copy.Name == null && copy.PropertyName == null) {
+        copy.Name = effectiveName;
+      }
+      if (copy.PropertyName == null) {
+        copy.PropertyName = (copy.Name as string | undefined) ?? effectiveName;
+      }
+      if (copy.__rawValue == null) {
+        copy.__rawValue = rawValue;
+      }
+      return copy;
+    }
+    if (rawValue && typeof rawValue === 'object') {
+      const typed = rawValue as Record<string, unknown>;
+      const clone: Record<string, unknown> = { ...typed };
+      if (clone.Name == null && clone.PropertyName == null) {
+        clone.Name = effectiveName;
+      }
+      if (clone.PropertyName == null) {
+        clone.PropertyName = (clone.Name as string | undefined) ?? effectiveName;
+      }
+      if (clone.type == null && clone.Type == null) {
+        clone.type = 'IFCPROPERTYSINGLEVALUE';
+      }
+      if (!('NominalValue' in clone) && !('nominalValue' in clone) && !('Value' in clone) && !('value' in clone)) {
+        clone.NominalValue = rawValue;
+      }
+      if (clone.__rawValue == null) {
+        clone.__rawValue = rawValue;
+      }
+      return clone;
+    }
+    return {
+      type: 'IFCPROPERTYSINGLEVALUE',
+      Name: effectiveName,
+      PropertyName: effectiveName,
+      NominalValue: rawValue,
+      __rawValue: rawValue,
+    };
+  };
+
+  const buildSyntheticPropertySet = (rawName: string, source: unknown): Record<string, unknown> => {
+    const properties: Record<string, unknown>[] = [];
+    const pushProperty = (candidateName: unknown, value: unknown) => {
+      const fallback = `Property ${properties.length + 1}`;
+      const candidateObj = candidateName as Record<string, unknown> | undefined;
+      const rawPropertyName =
+        (typeof candidateName === 'string' && candidateName.trim().length ? candidateName.trim() : undefined) ??
+        readName(candidateName) ??
+        (typeof candidateObj?.Name === 'string' ? (candidateObj.Name as string) : undefined) ??
+        (typeof candidateObj?.PropertyName === 'string' ? (candidateObj.PropertyName as string) : undefined) ??
+        fallback;
+      properties.push(ensureSingleValue(rawPropertyName, value, properties.length));
+    };
+
+    if (source && typeof source === 'object') {
+      const typed = source as Record<string, unknown>;
+      for (const key of IFC_PROPERTY_COLLECTION_KEYS) {
+        const collection = typed[key as keyof typeof typed];
+        if (Array.isArray(collection) && collection.length) {
+          collection.forEach((entry) => pushProperty(entry, entry));
+        }
+      }
+    }
+
+    if (!properties.length) {
+      if (Array.isArray(source)) {
+        source.forEach((entry) => pushProperty(entry, entry));
+      } else if (source && typeof source === 'object') {
+        for (const [propKey, propValue] of Object.entries(source as Record<string, unknown>)) {
+          if (propValue == null) continue;
+          if (PROPERTY_SET_METADATA_KEYS.has(propKey)) continue;
+          if (IFC_PROPERTY_COLLECTION_KEYS.includes(propKey as any)) continue;
+          if (PROPERTY_SET_CONTAINER_KEYS.includes(propKey as any)) continue;
+          pushProperty(propKey, propValue);
+        }
+      } else if (source != null) {
+        pushProperty(undefined, source);
+      }
+    }
+
+    return {
+      type: 'IFCPROPERTYSET',
+      Name: rawName,
+      HasProperties: properties,
+    } as Record<string, unknown>;
+  };
+
+  const emitPropertySetRows = (meta: PropertySetMeta, candidate: unknown) => {
+    if (!candidate || typeof candidate !== 'object') return;
+    const synthetic = buildSyntheticPropertySet(meta.rawName, candidate);
+    const list = Array.isArray((synthetic as any).HasProperties) ? ((synthetic as any).HasProperties as Record<string, unknown>[]) : [];
+    if (!list.length) return;
+
+    const friendlyPsetName = meta.friendlyName;
+
+    list.forEach((property, index) => {
+      const typedProp = property as Record<string, unknown>;
+      const nameCandidate =
+        (typeof typedProp.Name === 'string' ? (typedProp.Name as string) : undefined) ??
+        (typeof typedProp.PropertyName === 'string' ? (typedProp.PropertyName as string) : undefined) ??
+        `Property ${index + 1}`;
+      const friendlyPropertyName = prettifyLabel(nameCandidate) || nameCandidate;
+      const valueText = extractSingleValueText(property);
+
+      rows.push({
+        label: `Property Sets / ${friendlyPsetName} / ${friendlyPropertyName}`,
+        value: valueText || '',
+        rawPsetName: meta.rawName,
+        rawPropertyName: nameCandidate,
+      });
+    });
+  };
+
+  const processDeclarativeContainer = (container: unknown) => {
+    if (!container || typeof container !== 'object') return;
+    if (visited.has(container as object)) return;
+    visited.add(container as object);
+
+    if (Array.isArray(container)) {
+      container.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') return;
+        const meta = makePropertySetMeta(entry);
+        const target = isIfcPropertySet(entry) ? (entry as Record<string, unknown>) : buildSyntheticPropertySet(meta.rawName, entry);
+        emitPropertySetRows(meta, target);
+        visited.add(entry as object);
+      });
+      return;
+    }
+
+    for (const [psetName, rawValue] of Object.entries(container as Record<string, unknown>)) {
+      if (rawValue == null) continue;
+      const meta = makePropertySetMeta(psetName);
+      const target = isIfcPropertySet(rawValue) ? (rawValue as Record<string, unknown>) : buildSyntheticPropertySet(meta.rawName, rawValue);
+      emitPropertySetRows(meta, target);
+      if (rawValue && typeof rawValue === 'object') {
+        visited.add(rawValue as object);
+      }
+    }
+  };
+
   const traverse = (value: unknown) => {
     if (!value || typeof value !== 'object') return;
     if (visited.has(value as object)) return;
@@ -221,54 +411,16 @@ const collectIfcPropertySetRows = (root: unknown): PropertyRow[] => {
       return;
     }
 
-    if (isIfcPropertySet(value)) {
-      const typed = value as Record<string, unknown>;
-      const rawNameCandidate =
-        (typeof typed.Name === 'string' ? typed.Name : undefined) ??
-        (typeof typed.GlobalId === 'string' ? typed.GlobalId : undefined) ??
-        (typeof typed.GlobalID === 'string' ? typed.GlobalID : undefined) ??
-        (typeof typed.id === 'string' ? typed.id : undefined) ??
-        'Property Set';
-
-      const rawName = typeof rawNameCandidate === 'string' ? rawNameCandidate.trim() : String(rawNameCandidate ?? '');
-      const effectiveName = rawName.length ? rawName : 'Property Set';
-      const psetKeyBase = sanitizeKey(effectiveName) || 'property-set';
-      const occurrence = (psetCounters.get(psetKeyBase) ?? 0) + 1;
-      psetCounters.set(psetKeyBase, occurrence);
-      const collections = IFC_PROPERTY_COLLECTION_KEYS
-        .map((key) => (Array.isArray((typed as any)[key]) ? ((typed as any)[key] as unknown[]) : null))
-        .filter((collection): collection is unknown[] => Boolean(collection));
-
-      if (collections.length) {
-        const friendlyPsetName = prettifyLabel(effectiveName) || effectiveName;
-        const propertyCounters = new Map<string, number>();
-        collections.flat().forEach((property, index) => {
-          if (!property || typeof property !== 'object') return;
-          if (!isIfcPropertySingleValue(property)) return;
-
-          const typedProperty = property as Record<string, unknown>;
-          const nameCandidate =
-            (typeof typedProperty.Name === 'string' ? typedProperty.Name : undefined) ??
-            (typeof typedProperty.PropertyName === 'string' ? typedProperty.PropertyName : undefined);
-          const fallbackName = `Property ${index + 1}`;
-          const rawPropertyName = nameCandidate && nameCandidate.trim().length ? nameCandidate.trim() : fallbackName;
-          const friendlyPropertyName = prettifyLabel(rawPropertyName) || rawPropertyName;
-          const valueText = extractSingleValueText(property);
-
-          const propertyKeyBase = sanitizeKey(rawPropertyName) || 'property';
-          const occurrence = (propertyCounters.get(propertyKeyBase) ?? 0) + 1;
-          propertyCounters.set(propertyKeyBase, occurrence);
-
-          const label = `Property Sets / ${friendlyPsetName} / ${friendlyPropertyName}`;
-
-          rows.push({
-            label,
-            value: valueText || '',
-            rawPsetName: effectiveName,
-            rawPropertyName,
-          });
-        });
+    for (const key of PROPERTY_SET_CONTAINER_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        const container = (value as Record<string, unknown>)[key];
+        processDeclarativeContainer(container);
       }
+    }
+
+    if (isIfcPropertySet(value)) {
+      const meta = makePropertySetMeta(value);
+      emitPropertySetRows(meta, value);
     }
 
     Object.values(value as Record<string, unknown>).forEach((child) => {
@@ -344,6 +496,9 @@ const flattenPropertiesForIds = (data: unknown, globalId: string, ifcClass: stri
   flattened.GlobalId = globalId;
   flattened.ifcClass = ifcClass;
   attributes.ifcClass = ifcClass;
+  attributes.GlobalId = globalId;
+  flattened['Attributes.GlobalId'] = globalId;
+  flattened['Attributes.IfcClass'] = ifcClass;
   flattened['Attributes.ifcClass'] = ifcClass;
 
   const name = readName(data);
@@ -362,6 +517,27 @@ const flattenPropertiesForIds = (data: unknown, globalId: string, ifcClass: stri
   if (typeValue) {
     attributes.Type = typeValue;
     flattened['Attributes.Type'] = typeValue;
+  }
+
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+      if (value == null) continue;
+      if (typeof value !== 'object' || Array.isArray(value)) continue;
+      const nominal = extractNominalValue(value);
+      if (!nominal) continue;
+      const cleaned = String(key).replace(/^_+/, '');
+      const attrKey = `Attributes.${prettifyLabel(cleaned)}`;
+      if (!(attrKey in flattened)) flattened[attrKey] = nominal;
+      if (!(cleaned in attributes)) attributes[cleaned] = nominal;
+      if (/guid|globalid|_guid/i.test(key)) {
+        const candidate = nominal.trim();
+        if (candidate && !flattened.GlobalId) {
+          flattened.GlobalId = candidate;
+          attributes.GlobalId = candidate;
+          flattened['Attributes.GlobalId'] = candidate;
+        }
+      }
+    }
   }
 
   return { flattened, psets, attributes };
