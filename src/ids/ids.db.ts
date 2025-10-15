@@ -1,8 +1,8 @@
 import type { ElementData } from './ids.types';
 
 const DB_NAME = 'fragments-ids';
-const STORE_NAME = 'elements-v1';
-const DB_VERSION = 1;
+const STORE_NAME = 'elements-v5'; // v5: added value character normalization (dashes, quotes, spaces)
+const DB_VERSION = 5; // Bump version to recreate store
 
 type DbConnection = IDBDatabase;
 
@@ -12,6 +12,14 @@ const openStore = (): Promise<DbConnection> => {
     request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
     request.onupgradeneeded = () => {
       const db = request.result;
+      // Delete old stores on version upgrade
+      const oldStores = ['elements-v1', 'elements-v2', 'elements-v3', 'elements-v4'];
+      oldStores.forEach((storeName) => {
+        if (db.objectStoreNames.contains(storeName)) {
+          db.deleteObjectStore(storeName);
+        }
+      });
+      // Create current store if it doesn't exist
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }

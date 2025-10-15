@@ -36,15 +36,18 @@ import OpenInFullIcon from '@mui/icons-material/OpenInFull';
 import ViewListIcon from '@mui/icons-material/ViewList';
 import ChatIcon from '@mui/icons-material/Chat';
 import RuleIcon from '@mui/icons-material/Rule';
+import EditNoteIcon from '@mui/icons-material/EditNote';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import StarIcon from '@mui/icons-material/Star';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
 import FileDownloadIcon from '@mui/icons-material/FileDownload';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import * as THREE from 'three';
 import Stats from 'stats.js';
 import ChatWindow, { SelectionCommand } from './ChatWindow';
 import IdsPanel from './ids/IdsPanel';
+import IdsCreatorPanel from './ids/IdsCreatorPanel';
 import { idsStore } from './ids/ids.store';
 import type { ElementData, ViewerApi } from './ids/ids.types';
 
@@ -1165,6 +1168,7 @@ const App: React.FC = () => {
   const [chatExpandSignal, setChatExpandSignal] = useState(0);
   const [isIdsOpen, setIsIdsOpen] = useState(false);
   const [idsExpandSignal, setIdsExpandSignal] = useState(0);
+  const [isIdsCreatorOpen, setIsIdsCreatorOpen] = useState(false);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
   const [lastItemsDataTSV, setLastItemsDataTSV] = useState<string | null>(null);
   const [lastItemsDataRows, setLastItemsDataRows] = useState<{ path: string; value: string }[]>([]);
@@ -1372,6 +1376,48 @@ const App: React.FC = () => {
     setExportDialogOpen(true);
   }, [propertyRows.length, models, exportModelId]);
 
+  const handleCopyRawData = useCallback(async () => {
+    if (!properties) {
+      alert('No element selected');
+      return;
+    }
+    try {
+      // Handle circular references by tracking seen objects
+      const seen = new WeakSet();
+      const jsonString = JSON.stringify(properties, (key, value) => {
+        // Handle circular references
+        if (typeof value === 'object' && value !== null) {
+          if (seen.has(value)) {
+            return '[Circular Reference]';
+          }
+          seen.add(value);
+        }
+        // Handle special types
+        if (value instanceof Map) {
+          return `[Map with ${value.size} entries]`;
+        }
+        if (value instanceof Set) {
+          return `[Set with ${value.size} items]`;
+        }
+        if (value instanceof WeakMap || value instanceof WeakSet) {
+          return '[WeakMap/WeakSet]';
+        }
+        if (typeof value === 'function') {
+          return '[Function]';
+        }
+        if (typeof value === 'symbol') {
+          return '[Symbol]';
+        }
+        return value;
+      }, 2);
+      await navigator.clipboard.writeText(jsonString);
+      alert('Raw element data copied to clipboard!');
+    } catch (error) {
+      console.error('Failed to copy raw data:', error);
+      alert('Failed to copy data to clipboard. See console for details.');
+    }
+  }, [properties]);
+
   const handleCloseExportDialog = useCallback(() => {
     if (isExporting) return;
     setExportDialogOpen(false);
@@ -1440,13 +1486,13 @@ const App: React.FC = () => {
     [favoritePropertyPaths.length]
   );
 
+  const toggleIdsCreatorPanel = useCallback(() => {
+    setIsIdsCreatorOpen((prev) => !prev);
+  }, []);
+
   const openChatWindow = useCallback(() => {
-    setIsChatOpen((prev) => {
-      if (!prev) {
-        setChatExpandSignal((signal) => signal + 1);
-      }
-      return true;
-    });
+    setIsChatOpen(true);
+    setChatExpandSignal((value) => value + 1);
   }, []);
 
   const closeChatWindow = useCallback(() => {
@@ -1465,25 +1511,51 @@ const App: React.FC = () => {
 
   const extractIfcClassFromData = useCallback((data: any): string => {
     if (!data || typeof data !== 'object') return 'IfcProduct';
+    
+    // Primary: check constructor.name (web-ifc often uses class instances whose constructor name is the IFC type)
+    if (data.constructor && typeof data.constructor.name === 'string' && data.constructor.name.toUpperCase().startsWith('IFC')) {
+      const constructorName = data.constructor.name.trim();
+      if (constructorName !== 'Object' && constructorName !== 'Array') {
+        return constructorName;
+      }
+    }
+    
+    // Try _category.value (common for wrapped IFC data)
+    const categoryValue = extractNominalValue((data as any)._category ?? (data as any).category ?? (data as any).Category ?? null);
+    if (categoryValue && categoryValue.trim().length && categoryValue.toUpperCase().startsWith('IFC')) {
+      return categoryValue.trim();
+    }
+    
+    // Direct field candidates (order matters: most specific first)
     const candidates = [
+      (data as any).expressID !== undefined ? null : (data as any).type, // only use 'type' if expressID is not present (avoid confusion with type ID)
       (data as any).ifcClass,
       (data as any).IfcClass,
-      (data as any).type,
       (data as any).Type,
       (data as any).expressType,
       (data as any).ExpressType,
       (data as any).entity,
       (data as any).Entity,
+      (data as any).ifcType,
+      (data as any).IfcType,
       data?.attributes?.ifcClass,
       data?.Attributes?.IfcClass,
     ];
+    
     for (const candidate of candidates) {
       if (typeof candidate === 'string' && candidate.trim().length) {
-        return candidate.trim();
+        const trimmed = candidate.trim();
+        // Skip if it looks like a property type not an entity class
+        if (trimmed.toUpperCase().startsWith('IFC') && !trimmed.toUpperCase().includes('IDENTIFIER') && !trimmed.toUpperCase().includes('LABEL') && !trimmed.toUpperCase().includes('TEXT')) {
+          return trimmed;
+        }
       }
     }
-    const fallback = findFirstValueByKeywords(data, ['ifcclass', 'ifc type', 'type']);
-    if (fallback) return fallback;
+    
+    // Fallback keyword search
+    const fallback = findFirstValueByKeywords(data, ['ifcclass', 'ifc type', 'express type']);
+    if (fallback && fallback.toUpperCase().startsWith('IFC')) return fallback;
+    
     return 'IfcProduct';
   }, []);
 
@@ -1735,13 +1807,7 @@ const App: React.FC = () => {
             }
           }
         },
-      } as AsyncIterable<
-        Array<{
-          modelId: string;
-          localId: number;
-          data: Record<string, unknown>;
-        }>
-      >;
+      };
     },
     color: async (globalIds, rgba) => {
       if (!globalIds.length) return;
@@ -2090,8 +2156,9 @@ const App: React.FC = () => {
       const normal = hit.face.normal.clone().transformDirection(st.cube.matrixWorld);
       const target = new THREE.Vector3();
       const fragments = fragmentsRef.current;
-      const controls = getWorldCamera()?.controls ?? null;
-      const threeCamera = getThreeCamera();
+  const camera = getWorldCamera();
+      const controls = camera?.controls ?? null;
+      const threeCamera = camera?.three ?? null;
       if (!controls && !threeCamera) {
         console.warn('Navigation cube interaction skipped: viewer camera not ready.');
         return;
@@ -3163,7 +3230,6 @@ const App: React.FC = () => {
 
   const resetView = useCallback(() => {
     const world = worldRef.current;
-    if (!world) return;
     const camera = getWorldCamera();
     const controls = camera?.controls ?? null;
     const threeCamera = camera?.three ?? null;
@@ -3179,7 +3245,9 @@ const App: React.FC = () => {
     <div style={{ width: '100%', height: '100%' }}>
       <AppBar position="static">
         <Toolbar>
-          <Typography variant="h6" sx={{ flex: 1 }}>BIM Viewer</Typography>
+          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+            Fragments AI Viewer
+          </Typography>
           <Button
             color="inherit"
             onClick={toggleExplorerWindow}
@@ -3233,6 +3301,24 @@ const App: React.FC = () => {
             title={isIdsOpen ? 'Close IDS Checker' : 'Open IDS Checker'}
           >
             IDS Checker
+          </Button>
+          <Button
+            color="inherit"
+            onClick={toggleIdsCreatorPanel}
+            startIcon={<EditNoteIcon />}
+            aria-pressed={isIdsCreatorOpen}
+            sx={{
+              mr: 1,
+              borderRadius: 1.5,
+              backgroundColor: isIdsCreatorOpen ? 'rgba(255,255,255,0.18)' : 'transparent',
+              transition: 'background-color 0.2s ease',
+              '&:hover': {
+                backgroundColor: isIdsCreatorOpen ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.12)'
+              }
+            }}
+            title={isIdsCreatorOpen ? 'Close IDS Creator' : 'Open IDS Creator'}
+          >
+            IDS Creator
           </Button>
           <Button color="inherit" onClick={fitToCurrentModel} disabled={!modelLoaded} sx={{ mr: 1 }}>
             Fit to Model
@@ -3537,6 +3623,18 @@ const App: React.FC = () => {
                               placeholder="Search properties…"
                               disabled={!propertyRows.length}
                             />
+                            <Tooltip title="Copy raw element JSON">
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  onClick={handleCopyRawData}
+                                  disabled={!properties}
+                                  color="primary"
+                                >
+                                  <ContentCopyIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
                             <Tooltip title="Export properties">
                               <span>
                                 <Button
@@ -3570,6 +3668,7 @@ const App: React.FC = () => {
                             </Paper>
                           ) : hasSelectionSearch ? (
                             matchedPropertyRows.length ? (
+                             
                               <Paper
                                 variant="outlined"
                                 sx={{
@@ -3825,6 +3924,13 @@ const App: React.FC = () => {
           hasModel={models.length > 0}
           expandSignal={idsExpandSignal}
         />
+
+      <IdsCreatorPanel
+        isOpen={isIdsCreatorOpen}
+        onClose={() => setIsIdsCreatorOpen(false)}
+        viewerApi={viewerApi}
+        selectedItemData={properties}
+      />
 
       <ChatWindow
         getModelDataForAI={getModelDataForAI}

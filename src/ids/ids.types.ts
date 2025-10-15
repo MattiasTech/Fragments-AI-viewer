@@ -18,6 +18,25 @@ export type ElementData = {
   properties: Record<string, unknown>;
 };
 
+export type IdsSpecification = {
+  id: string;
+  name: string;
+  description: string;
+  applicability: unknown[];
+  // requirements can be either legacy snapshots or structured rules
+  requirements: Array<RequirementRule | unknown>;
+};
+
+export type RequirementOperator = 'exists' | 'equals' | 'not-equals' | 'contains' | 'matches' | 'greater-than' | 'less-than';
+
+export type RequirementRule = {
+  id: string;
+  propertyPath: string; // e.g. 'Pset_Insulation.ThermalResistance'
+  operator: RequirementOperator;
+  value?: string; // stringified comparison value
+  sample?: Record<string, unknown> | null; // optional provenance
+};
+
 export interface ViewerApi {
   listGlobalIds(): Promise<string[]>;
   getElementProps(globalId: string): Promise<{

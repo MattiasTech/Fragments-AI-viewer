@@ -78,9 +78,25 @@ const formatPrimitive = (value: unknown): string => {
   }
 };
 
+const normalizeValueCharacters = (value: string): string => {
+  if (!value || typeof value !== 'string') return value;
+  return value
+    // Normalize various dash characters to hyphen-minus
+    .replace(/[\u2013\u2014\u2212\u2010\u2011]/g, '-') // en-dash, em-dash, minus, hyphen, non-breaking hyphen
+    // Normalize various quote characters
+    .replace(/[\u2018\u2019]/g, "'") // smart single quotes
+    .replace(/[\u201C\u201D]/g, '"') // smart double quotes
+    // Normalize various spaces
+    .replace(/[\u00A0\u2000-\u200B]/g, ' ') // non-breaking space, various width spaces
+    .trim();
+};
+
 const extractNominalValue = (value: unknown): string => {
   if (value == null) return '';
-  if (typeof value !== 'object') return formatPrimitive(value);
+  if (typeof value !== 'object') {
+    const formatted = formatPrimitive(value);
+    return normalizeValueCharacters(formatted);
+  }
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
     if ('value' in record) return extractNominalValue(record.value);
@@ -94,7 +110,8 @@ const extractNominalValue = (value: unknown): string => {
     // @ts-expect-error - treat as vector
     return `${formatPrimitive(value.x)}, ${formatPrimitive(value.y)}, ${formatPrimitive(value.z)}`;
   }
-  return formatPrimitive(value);
+  const formatted = formatPrimitive(value);
+  return normalizeValueCharacters(formatted);
 };
 
 const findFirstValueByKeywords = (source: unknown, keywords: string[]): string | undefined => {
@@ -149,7 +166,7 @@ const normalizeIdsToken = (value: string): string => {
 
 const IFC_PROPERTY_COLLECTION_KEYS = ['HasProperties', 'hasProperties', 'Properties', 'properties'] as const;
 
-const PROPERTY_SET_CONTAINER_KEYS = ['psets', 'Psets', 'propertySets', 'PropertySets', 'property_sets', 'Property_Sets'] as const;
+const PROPERTY_SET_CONTAINER_KEYS = ['IsDefinedBy', 'isDefinedBy', 'psets', 'Psets', 'propertySets', 'PropertySets', 'property_sets', 'Property_Sets'] as const;
 
 const PROPERTY_SET_METADATA_KEYS = new Set([
   'type',
@@ -358,10 +375,26 @@ const collectIfcPropertySetRows = (root: unknown): PropertyRow[] => {
 
     list.forEach((property, index) => {
       const typedProp = property as Record<string, unknown>;
-      const nameCandidate =
-        (typeof typedProp.Name === 'string' ? (typedProp.Name as string) : undefined) ??
-        (typeof typedProp.PropertyName === 'string' ? (typedProp.PropertyName as string) : undefined) ??
-        `Property ${index + 1}`;
+      
+      // Handle nested Name.value structure from fragments library
+      let nameCandidate: string | undefined;
+      if (typeof typedProp.Name === 'string') {
+        nameCandidate = typedProp.Name;
+      } else if (typedProp.Name && typeof typedProp.Name === 'object') {
+        const nameObj = typedProp.Name as Record<string, unknown>;
+        if (typeof nameObj.value === 'string') {
+          nameCandidate = nameObj.value;
+        }
+      }
+      
+      if (!nameCandidate && typeof typedProp.PropertyName === 'string') {
+        nameCandidate = typedProp.PropertyName;
+      }
+      
+      if (!nameCandidate) {
+        nameCandidate = `Property ${index + 1}`;
+      }
+      
       const friendlyPropertyName = prettifyLabel(nameCandidate) || nameCandidate;
       const valueText = extractSingleValueText(property);
 
@@ -435,7 +468,18 @@ const collectIfcPropertySetRows = (root: unknown): PropertyRow[] => {
 const readName = (value: unknown): string | undefined => {
   if (!value || typeof value !== 'object') return undefined;
   const typed = value as Record<string, unknown>;
-  const primary = typeof typed.Name === 'string' ? typed.Name : undefined;
+  
+  // Handle fragments library nested value structure: { Name: { value: "string" } }
+  let primary: string | undefined;
+  if (typeof typed.Name === 'string') {
+    primary = typed.Name;
+  } else if (typed.Name && typeof typed.Name === 'object') {
+    const nameObj = typed.Name as Record<string, unknown>;
+    if (typeof nameObj.value === 'string') {
+      primary = nameObj.value;
+    }
+  }
+  
   const secondary = typeof (typed as any).name === 'string' ? (typed as any).name : undefined;
   const name = primary ?? secondary;
   if (!name) return undefined;
@@ -446,6 +490,34 @@ const readName = (value: unknown): string | undefined => {
 const extractIfcClassFromData = (data: unknown): string => {
   if (!data || typeof data !== 'object') return 'IfcProduct';
   const typed = data as Record<string, unknown>;
+  
+  // Property value types that should NOT be treated as entity classes
+  const PROPERTY_TYPES = new Set([
+    'IFCIDENTIFIER', 'IFCLABEL', 'IFCTEXT', 'IFCBOOLEAN', 'IFCINTEGER', 'IFCREAL',
+    'IFCLENGTHMEASURE', 'IFCPOSITIVELENGTHMEASURE', 'IFCAREAMEASURE', 'IFCVOLUMEMEASURE',
+    'IFCPOSITIVERATIOMEASURE', 'IFCPLANEANGLEMEASURE', 'IFCPOSITIVEINTEGER', 'IFCLOGICAL'
+  ]);
+  
+  // 1. Check if data is a web-ifc constructor instance
+  if (typed.constructor && typeof typed.constructor === 'function' && typed.constructor.name) {
+    const constructorName = typed.constructor.name.toUpperCase();
+    if (constructorName.startsWith('IFC') && !PROPERTY_TYPES.has(constructorName)) {
+      return constructorName;
+    }
+  }
+  
+  // 2. Check _category.value (fragments library pattern)
+  if (typed._category && typeof typed._category === 'object') {
+    const category = typed._category as Record<string, unknown>;
+    if (category.value && typeof category.value === 'string') {
+      const categoryValue = category.value.trim().toUpperCase();
+      if (categoryValue.startsWith('IFC') && !PROPERTY_TYPES.has(categoryValue)) {
+        return categoryValue;
+      }
+    }
+  }
+  
+  // 3. Check standard fields
   const candidates = [
     typed.ifcClass,
     typed.IfcClass,
@@ -460,11 +532,23 @@ const extractIfcClassFromData = (data: unknown): string => {
   ];
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate.trim().length) {
-      return candidate.trim();
+      const trimmed = candidate.trim().toUpperCase();
+      // Filter out property types
+      if (!PROPERTY_TYPES.has(trimmed)) {
+        return candidate.trim(); // Return original casing
+      }
     }
   }
+  
+  // 4. Fallback keyword search (but filter property types)
   const fallback = findFirstValueByKeywords(data, ['ifcclass', 'ifc type', 'type']);
-  if (fallback) return fallback;
+  if (fallback) {
+    const fallbackUpper = fallback.trim().toUpperCase();
+    if (!PROPERTY_TYPES.has(fallbackUpper)) {
+      return fallback;
+    }
+  }
+  
   return 'IfcProduct';
 };
 

@@ -1,6 +1,357 @@
-import type { BuildProgress, ElementData, Phase, ViewerApi } from './ids.types';
+import { XMLBuilder, XMLParser } from 'fast-xml-parser';
+import type { BuildProgress, ElementData, IdsSpecification, Phase, ViewerApi } from './ids.types';
 import { idsDb } from './ids.db';
 import { computeModelKey } from './ids.hash';
+
+const xmlOptions = {
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  cdataPropName: '__cdata',
+  processEntities: true,
+  htmlEntities: true,
+  suppressEmptyNode: true,
+  preserveOrder: false,
+  format: true,
+};
+
+const ensureArray = <T>(value: T | T[] | undefined | null): T[] => {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+};
+
+const parseRuleCollection = (raw: unknown): unknown[] => {
+  if (raw == null) return [];
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  if (typeof raw === 'object') {
+    const record = raw as Record<string, unknown>;
+    if (typeof record.__cdata === 'string') {
+      try {
+        const parsed = JSON.parse(record.__cdata);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    if (Array.isArray(record.item)) return record.item;
+    if (record.item != null) return [record.item];
+    if (Array.isArray(record.Rule)) return record.Rule as unknown[];
+    if (record.Rule != null) return [record.Rule];
+  }
+  return Array.isArray(raw) ? (raw as unknown[]) : [];
+};
+
+export const parseIds = (xml: string): IdsSpecification[] => {
+  if (!xml || typeof xml !== 'string') return [];
+  const parser = new XMLParser(xmlOptions);
+  let root: any = {};
+  try {
+    root = parser.parse(xml);
+  } catch (error) {
+    console.warn('IDS adapter: failed to parse XML, returning empty specification list', error);
+    return [];
+  }
+  // First, try to parse our custom IdsCreator wrapper (legacy)
+  const container = root?.IdsCreator ?? root?.idsCreator ?? root?.IDS_CREATOR ?? root?.Ids ?? root;
+  const specsSource = container?.Specification ?? container?.specification ?? container?.Specifications ?? container?.specifications ?? null;
+  if (specsSource) {
+    const specsArray = ensureArray(specsSource);
+    if (specsArray.length) {
+      return specsArray.map((entry: any, index: number): IdsSpecification => {
+        const id = (entry?.['@_id'] as string)?.trim?.() || `spec-${index + 1}`;
+        const name = (entry?.Name ?? entry?.name ?? '')?.toString?.() ?? '';
+        const description = (entry?.Description ?? entry?.description ?? '')?.toString?.() ?? '';
+        const applicability = parseRuleCollection(entry?.Applicability ?? entry?.applicability);
+        const requirements = parseRuleCollection(entry?.Requirements ?? entry?.requirements);
+        return {
+          id,
+          name,
+          description,
+          applicability,
+          requirements,
+        };
+      });
+    }
+  }
+
+  // Fallback: try to parse standard IDS format (namespace-aware). We'll search for any node named 'specification' ignoring namespace.
+  const findSpecifications = (node: any): any[] => {
+    if (!node || typeof node !== 'object') return [];
+    for (const [key, val] of Object.entries(node)) {
+      const lname = String(key).toLowerCase();
+      if (lname.endsWith(':specification') || lname === 'specification' || lname === 'ids:specification') {
+        return ensureArray(val);
+      }
+    }
+    // recurse
+    for (const val of Object.values(node)) {
+      if (val && typeof val === 'object') {
+        const found = findSpecifications(val);
+        if (found && found.length) return found;
+      }
+    }
+    return [];
+  };
+
+  const specNodes = findSpecifications(root);
+  if (!specNodes.length) return [];
+
+  const readText = (node: any): string | null => {
+    if (!node) return null;
+    if (typeof node === 'string') return node;
+    if (typeof node === 'object') {
+      // common shapes: { 'ids:simpleValue': 'X' } or { simpleValue: 'X' } or { '#text': 'X' }
+      for (const k of Object.keys(node)) {
+        const lk = k.toLowerCase();
+        if (lk.includes('simplevalue') || lk === '#text' || lk === 'value') {
+          const v = node[k];
+          if (typeof v === 'string') return v;
+          if (typeof v === 'object' && (v?.value || v?.Value)) return String(v.value ?? v.Value);
+        }
+      }
+    }
+    return null;
+  };
+
+  const specs: IdsSpecification[] = specNodes.map((entry: any, index: number) => {
+    const id = (entry?.['@_id'] as string)?.trim?.() || `spec-${index + 1}`;
+    const rawName = entry?.['@_name'] ?? entry?.name ?? entry?.Name ?? '';
+    const name = String(rawName ?? '');
+    const desc = '';
+    const applicability: any[] = [];
+    const requirements: any[] = [];
+
+    // Applicability: look for applicability -> entity -> name -> simpleValue
+    const apps = entry?.applicability ?? entry?.Applicability ?? entry?.['ids:applicability'] ?? null;
+    const appArr = ensureArray(apps);
+    for (const a of appArr) {
+      // drill down to first simple value
+      let found: string | null = null;
+      const stack: any[] = [a];
+      while (stack.length && !found) {
+        const node = stack.shift();
+        if (!node) continue;
+        const txt = readText(node);
+        if (txt) { found = txt; break; }
+        if (typeof node === 'object') {
+          for (const v of Object.values(node)) if (v && typeof v === 'object') stack.push(v as any);
+        }
+      }
+      if (found) applicability.push({ entity: found });
+    }
+
+    // Requirements: look for property entries
+    const reqs = entry?.requirements ?? entry?.Requirements ?? entry?.['ids:requirements'] ?? null;
+    const reqArr = ensureArray(reqs);
+    // Specs sometimes wrap properties in ids:property -> propertySet/baseName
+    const collectPropertyEntries = (node: any) => {
+      const props: any[] = [];
+      const propNodes = [] as any[];
+      // try several shapes
+      if (node?.property) propNodes.push(...ensureArray(node.property));
+      if (node?.Property) propNodes.push(...ensureArray(node.Property));
+      if (Array.isArray(node)) propNodes.push(...node);
+      if (!propNodes.length && typeof node === 'object') {
+        for (const val of Object.values(node)) {
+          if (val && typeof val === 'object') propNodes.push(val as any);
+        }
+      }
+      for (const p of propNodes) {
+        // find pset and baseName
+        const psetNode = p?.propertySet ?? p?.PropertySet ?? p?.['ids:propertySet'] ?? p?.propertySet;
+        const baseNode = p?.baseName ?? p?.BaseName ?? p?.['ids:baseName'] ?? p?.baseName;
+        const pset = readText(psetNode) || readText(p?.propertySet?.simpleValue) || readText(p?.propertySet?.['ids:simpleValue']);
+        const base = readText(baseNode) || readText(p?.baseName?.simpleValue) || readText(p?.baseName?.['ids:simpleValue']);
+        const allowed: string[] = [];
+        const allowedNode = p?.allowedValues ?? p?.AllowedValues ?? p?.['ids:allowedValues'];
+        if (allowedNode) {
+          const values = allowedNode?.values ?? allowedNode?.Values ?? allowedNode?.['ids:values'] ?? allowedNode;
+          const valArr = ensureArray(values?.value ?? values?.Value ?? values?.['ids:value'] ?? values ?? []);
+          for (const v of valArr) {
+            const txt = readText(v) || readText(v?.simpleValue) || readText(v?.['ids:simpleValue']);
+            if (txt) allowed.push(txt);
+          }
+        }
+        if (pset || base) {
+          const rule: any = { id: `rule-${index}-${props.length}`, propertyPath: `${pset ?? 'Pset'}.${base ?? 'Property'}`, operator: 'equals' };
+          if (allowed.length) rule.value = allowed.length === 1 ? allowed[0] : JSON.stringify(allowed);
+          props.push(rule);
+        }
+      }
+      return props;
+    };
+
+    for (const r of reqArr) {
+      const collected = collectPropertyEntries(r);
+      if (collected.length) requirements.push(...collected);
+    }
+
+    return { id, name: String(name ?? ''), description: String(desc), applicability, requirements } as IdsSpecification;
+  });
+
+  return specs;
+};
+
+export const generateIdsXml = (specs: IdsSpecification[]): string => {
+  const builder = new XMLBuilder(xmlOptions);
+  // If any spec contains structured requirement entries (propertyPath), emit standard IDS XML
+  const hasStructured = (specs ?? []).some((s) => Array.isArray(s.requirements) && s.requirements.some((r) => r && typeof r === 'object' && 'propertyPath' in (r as any)));
+  if (hasStructured) {
+    const idsSpecs = (specs ?? []).map((spec) => {
+        const applicabilityNodes: any[] = [];
+      const extractEntityName = (a: any): string | null => {
+        if (!a && a !== 0) return null;
+        // common direct values
+        if (typeof a === 'string') return a;
+        if (typeof a === 'number') return String(a);
+        
+        // Check top-level ifcClass field first (from our capture)
+        if (a?.ifcClass && typeof a.ifcClass === 'string' && a.ifcClass.trim()) {
+          return a.ifcClass.trim();
+        }
+        
+        // try other direct fields
+        const maybe = a?.entity ?? a?.ifcType ?? a?.type;
+        if (maybe && typeof maybe === 'string' && maybe.trim()) return maybe.trim();
+        
+        // sample container
+        const sample = a?.sample ?? a;
+        if (sample) {
+          // Try _category.value first (most common for IFC class)
+          if (sample._category && typeof sample._category === 'object') {
+            const catValue = sample._category.value ?? sample._category.Value;
+            if (typeof catValue === 'string' && catValue.trim()) return catValue.trim();
+          }
+          const byKeys = sample?.ifcClass ?? sample?.category?.value ?? sample?.type ?? sample?._type;
+          if (byKeys && typeof byKeys === 'string' && byKeys.trim()) return byKeys.trim();
+        }
+        return null;
+      };
+
+      for (const app of ensureArray(spec.applicability)) {
+        const name = extractEntityName(app as any) ?? null;
+        // If no name, fallback to wildcard so rule can still apply
+        const finalName = name && String(name).trim() ? String(name) : 'IFCELEMENT';
+        applicabilityNodes.push({ 'ids:name': { 'ids:simpleValue': finalName } });
+      }
+
+      const requirementNodes: any[] = [];
+      const extractPsetName = (v: any): string => {
+        if (v == null) return '';
+        if (typeof v === 'string') return v;
+        if (typeof v === 'number') return String(v);
+        if (typeof v === 'object') {
+          if (v['ids:simpleValue']) return String(v['ids:simpleValue']);
+          if (v.__cdata) return String(v.__cdata);
+          if (v.Name) return String(v.Name);
+          if (v.name) return String(v.name);
+          // try to find a string field
+          for (const key of Object.keys(v)) {
+            const val = v[key];
+            if (typeof val === 'string' && val.trim()) return val;
+            if (val && typeof val === 'object') {
+              const vv = val as any;
+              if (typeof vv['ids:simpleValue'] === 'string') return vv['ids:simpleValue'];
+              if (typeof vv.value === 'string') return vv.value;
+            }
+          }
+          // avoid returning '[object Object]' as a fallback; return empty so caller can choose default
+          return '';
+        }
+        return '';
+      };
+
+      for (const req of ensureArray(spec.requirements)) {
+        if (req && typeof req === 'object') {
+          const r = req as any;
+          // propertyPath might be a string like 'Pset.Name' or an object with pset/property fields
+          let psetRaw: any = null;
+          let propRaw: any = null;
+          if (typeof r.propertyPath === 'string') {
+            const [a, b] = String(r.propertyPath).split('.');
+            psetRaw = a; propRaw = b;
+          } else if (r.propertyPath && typeof r.propertyPath === 'object') {
+            psetRaw = r.propertyPath.pset ?? r.propertyPath.propertySet ?? r.propertySet ?? null;
+            propRaw = r.propertyPath.property ?? r.propertyPath.prop ?? r.property ?? r.propertyName ?? null;
+          } else {
+            psetRaw = r.propertySet ?? r.pset ?? null;
+            propRaw = r.baseName ?? r.property ?? r.prop ?? null;
+          }
+          const psetName = extractPsetName(psetRaw) || 'Pset';
+          const baseName = extractPsetName(propRaw) || 'Property';
+          
+          // Normalize property and pset names to match how they're stored in flattened properties
+          // (spaces become underscores, etc.) so validation can find them
+          const normalizedPsetName = normalizeToken(psetName) || psetName;
+          const normalizedBaseName = normalizeToken(baseName) || baseName;
+          
+          const propNode: any = {};
+          propNode['ids:propertySet'] = { 'ids:simpleValue': normalizedPsetName };
+          propNode['ids:baseName'] = { 'ids:simpleValue': normalizedBaseName };
+          
+          // Handle operator: 'exists' means no value constraint; others require allowedValues
+          const operator = r.operator ?? 'equals';
+          if (operator === 'exists') {
+            // For 'exists' operator, don't add allowedValues (just check property presence)
+            // Some IDS validators require empty simpleValue or omit the node entirely
+            // We'll emit an empty simpleValue to indicate "any value is acceptable"
+            propNode['ids:allowedValues'] = { 'ids:values': { 'ids:value': { 'ids:simpleValue': '' } } };
+          } else if (r.value != null && String(r.value).trim()) {
+            let allowedArr: string[] | null = null;
+            try {
+              const parsed = typeof r.value === 'string' ? JSON.parse(r.value) : r.value;
+              if (Array.isArray(parsed)) allowedArr = parsed.map((v: any) => String(v));
+            } catch {
+              // not JSON
+            }
+            if (!allowedArr) {
+              if (typeof r.value === 'string' && r.value.includes(',')) allowedArr = r.value.split(',').map((s: string) => normalizeValueCharacters(s.trim())).filter(Boolean);
+            }
+            if (allowedArr && allowedArr.length) {
+              propNode['ids:allowedValues'] = { 'ids:values': { 'ids:value': allowedArr.map((v) => ({ 'ids:simpleValue': normalizeValueCharacters(String(v)) })) } };
+            } else {
+              propNode['ids:allowedValues'] = { 'ids:values': { 'ids:value': { 'ids:simpleValue': normalizeValueCharacters(String(r.value)) } } };
+            }
+          }
+          requirementNodes.push({ 'ids:property': propNode });
+        }
+      }
+
+      const specNode: any = {
+        '@_ifcVersion': 'IFC4',
+        '@_name': spec.name ?? '',
+      };
+      if (applicabilityNodes.length) specNode['ids:applicability'] = { 'ids:entity': applicabilityNodes.map((n) => ({ 'ids:name': n['ids:name'] ? n['ids:name'] : n })) };
+      if (requirementNodes.length) specNode['ids:requirements'] = { 'ids:property': requirementNodes.map((r) => r['ids:property']) };
+      return specNode;
+    });
+
+    const payload: any = { 'ids:ids': { '@_xmlns:ids': 'http://standards.buildingsmart.org/IDS', 'ids:specification': idsSpecs } };
+    const xmlBody = builder.build(payload);
+    return xmlBody.startsWith('<?xml') ? xmlBody : `<?xml version="1.0" encoding="UTF-8"?>\n${xmlBody}`;
+  }
+
+  // Fallback: keep the original IdsCreator wrapper for backwards compatibility
+  const payload = {
+    IdsCreator: {
+      Specification: (specs ?? []).map((spec) => ({
+        '@_id': spec.id,
+        Name: spec.name,
+        Description: spec.description,
+        Applicability: { __cdata: JSON.stringify(spec.applicability ?? []) },
+        Requirements: { __cdata: JSON.stringify(spec.requirements ?? []) },
+      })),
+    },
+  };
+  const xmlBody = builder.build(payload);
+  return xmlBody.startsWith('<?xml') ? xmlBody : `<?xml version="1.0" encoding="UTF-8"?>\n${xmlBody}`;
+};
 
 const normalizeToken = (value: string): string => {
   if (!value) return '';
@@ -13,9 +364,22 @@ const normalizeToken = (value: string): string => {
     .replace(/^_+|_+$/g, '');
 };
 
+const normalizeValueCharacters = (value: string): string => {
+  if (!value || typeof value !== 'string') return value;
+  return value
+    // Normalize various dash characters to hyphen-minus
+    .replace(/[\u2013\u2014\u2212\u2010\u2011]/g, '-') // en-dash, em-dash, minus, hyphen, non-breaking hyphen
+    // Normalize various quote characters
+    .replace(/[\u2018\u2019]/g, "'") // smart single quotes
+    .replace(/[\u201C\u201D]/g, '"') // smart double quotes
+    // Normalize various spaces
+    .replace(/[\u00A0\u2000-\u200B]/g, ' ') // non-breaking space, various width spaces
+    .trim();
+};
+
 const formatValue = (value: unknown): string => {
   if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'string') return normalizeValueCharacters(value.trim());
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   try {
     return JSON.stringify(value);
