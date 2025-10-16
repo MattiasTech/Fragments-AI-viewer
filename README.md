@@ -77,34 +77,12 @@ node -v
 npm -v
 ```
 
-### OpenAI API Configuration (Optional)
+### Google Gemini API Configuration
 To use the AI Assistant feature:
 
-1. Get an API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-2. Configure the API key in `src/ChatWindow.tsx`:
-   ```typescript
-   const OPENAI_API_KEY = 'your-api-key-here';
-   ```
-   > **Note**: For production deployments, use environment variables instead of hardcoding the API key.
-
-3. The AI Assistant uses the GPT-4 model by default. You can modify the model in `ChatWindow.tsx` if needed.
-
-## Install and run locally
-1) Install dependencies:
-
-```powershell
-npm install
-```
-
-2) Start the dev server:
-
-```powershell
-npm run dev
-```
-
-3) Open the app (Vite will print the local URL, commonly `http://localhost:5173`).
-
-4) Use the toolbar buttons or Model Explorer to load models and explore features.
+1. Get an API key from Google AI.
+2. Configure the API key in your .env
+3. The AI Assistant uses the Gemeni 2.5 light by default. You can modify the model in `ChatWindow.tsx` if needed.
 
 ## Usage Guide
 
@@ -186,6 +164,23 @@ npm run dev
   - Filter validation results to focus on specific issues
   - Export validation results for sharing with team members
 
+## Install and run locally
+1) Install dependencies:
+
+```powershell
+npm install
+```
+
+2) Start the dev server:
+
+```powershell
+npm run dev
+```
+
+3) Open the app (Vite will print the local URL, commonly `http://localhost:5173`).
+
+4) Use the toolbar buttons or Model Explorer to load models and explore features.
+
 ## Build for production
 Generate a static build in the `dist/` folder:
 
@@ -229,11 +224,10 @@ Notes:
 - If you switch to a custom domain, set `base: '/'` and configure your DNS and a `CNAME` file in the `public/` folder (advanced).
 
 ## Known Issues & Limitations
-- **Large IFC Files**: Browser-based IFC parsing may take significant time for very large models (>100MB). Consider converting to `.frag` format for better performance.
 - **Memory Usage**: Multiple large models loaded simultaneously may cause memory issues in some browsers.
 - **Unicode Characters**: Some property names with special characters (en-dash vs hyphen) are normalized for validation accuracy.
 - **Browser Compatibility**: Best experience on Chrome/Edge. Firefox and Safari are supported but may have minor rendering differences.
-- **AI Assistant**: Requires valid OpenAI API key and internet connection. Responses depend on API availability and rate limits.
+- **AI Assistant**: Requires valid Google Gemini API key in .env local file and internet connection. Responses depend on API availability and rate limits.
 
 ## Troubleshooting
 
@@ -245,8 +239,6 @@ Notes:
   - Pages sometimes takes a minute to publish—wait and hard refresh (Ctrl+F5).
 
 ### Model Loading Issues
-- **IFC import fails**:
-  - Confirm `public/web-ifc/web-ifc.wasm` and `public/web-ifc/web-ifc-api.js` exist. They're required for parsing IFC.
   - Check browser console for specific error messages.
   
 - **Properties not showing**:
@@ -273,42 +265,12 @@ Notes:
 
 ### AI Assistant Issues
 - **No response from AI**:
-  - Verify OpenAI API key is correctly configured in `ChatWindow.tsx`.
+  -  Now only availabel in local dev mode. Investigating multi user support ongoing.
+  - Verify Gemini API key is correctly configured in .env local file.
   - Check browser console for API errors (rate limits, invalid key, etc.).
   - Ensure internet connection is active.
 
-## Project Structure
 
-```
-Fragments-AI-viewer/
-├── src/
-│   ├── App.tsx                    # Main application component with 3D viewer
-│   ├── ChatWindow.tsx             # AI chat assistant interface
-│   ├── main.tsx                   # Application entry point
-│   ├── index.css                  # Global styles
-│   ├── ids/                       # IDS validation and creation modules
-│   │   ├── IdsPanel.tsx          # IDS Checker panel component
-│   │   ├── IdsCreatorPanel.tsx   # IDS Creator panel component
-│   │   ├── ids.adapter.ts        # IDS-to-fragment validation adapter
-│   │   ├── ids.db.ts             # IndexedDB storage for IDS data
-│   │   ├── ids.exports.ts        # CSV/JSON export utilities
-│   │   ├── ids.hash.ts           # IDS file hashing and caching
-│   │   ├── ids.store.ts          # IDS state management (Zustand)
-│   │   ├── ids.types.ts          # TypeScript interfaces for IDS
-│   │   └── vendor/
-│   │       └── bsdd-ids-validator.ts  # buildingSMART IDS validator
-│   └── workers/                   # Web Workers for background processing
-│       ├── buildProps.worker.ts  # Property extraction worker
-│       └── ids.worker.ts         # IDS validation worker
-├── public/
-│   └── web-ifc/                  # Web-IFC WASM and API for IFC parsing
-│       ├── web-ifc.wasm
-│       └── web-ifc-api.js
-├── vite.config.ts                # Vite build configuration
-├── tsconfig.json                 # TypeScript configuration
-├── package.json                  # Dependencies and scripts
-└── index.html                    # HTML entry point
-```
 
 ### Key Technologies
 - **React 18** with TypeScript for UI components
@@ -325,12 +287,10 @@ Fragments-AI-viewer/
 
 Planned features and improvements:
 
-- [ ] **Floating View Toolbar**: Icon-based panel with clipping planes (X/Y/Z), clipping box, and measuring tools
 - [ ] **Enhanced Measurement**: Distance, area, and volume measurement tools
 - [ ] **Annotations**: Add comments and markups to 3D elements
 - [ ] **Comparison Mode**: Visual diff between model versions
 - [ ] **Advanced IDS Editor**: Visual rule builder with drag-and-drop
-- [ ] **Export 3D Views**: Generate screenshots or 3D PDF exports
 - [ ] **Collaboration**: Share annotations and validation results with team
 - [ ] **Custom Property Mappings**: Map non-standard property schemas
 - [ ] **Performance Optimizations**: LOD (Level of Detail) and frustum culling improvements
@@ -363,7 +323,6 @@ Built with excellent open-source tools:
 
 ## License
 This project is open source. See `LICENSE` for details.
-
 ---
 
 **Made with ❤️ for the BIM community**
