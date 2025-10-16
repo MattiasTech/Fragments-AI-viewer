@@ -387,6 +387,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     const lowered = detailSearch.trim().toLowerCase();
     const statusValue = statusFilter === 'ALL' ? null : statusFilter;
     const ruleValue = ruleFilter === 'ALL' ? null : ruleFilter;
+    
     filterRows((row) => {
       if (statusValue && row.status !== statusValue) return false;
       if (ruleValue && row.ruleId !== ruleValue) return false;
@@ -428,35 +429,50 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
       console.warn('Failed to reset viewer colors before highlighting rule', error);
     }
     try {
-      for (const chunk of chunkIds(failed)) {
-        if (!chunk.length) continue;
-        await Promise.resolve(viewerApi.color(chunk, { r: 1, g: 0.2, b: 0.2, a: 1 }));
-      }
-      for (const chunk of chunkIds(passed)) {
-        if (!chunk.length) continue;
-        await Promise.resolve(viewerApi.color(chunk, { r: 0.2, g: 0.7, b: 0.25, a: 1 }));
+      if (typeof viewerApi.color === 'function') {
+        for (const chunk of chunkIds(failed)) {
+          if (!chunk.length) continue;
+          await Promise.resolve(viewerApi.color(chunk, { r: 1, g: 0.2, b: 0.2, a: 1 }));
+        }
+        for (const chunk of chunkIds(passed)) {
+          if (!chunk.length) continue;
+          await Promise.resolve(viewerApi.color(chunk, { r: 0.2, g: 0.7, b: 0.25, a: 1 }));
+        }
       }
       if (target.length) {
-        await Promise.resolve(viewerApi.isolate(target));
-        await Promise.resolve(viewerApi.fitViewTo(target));
+        if (typeof viewerApi.isolate === 'function') {
+          await Promise.resolve(viewerApi.isolate(target));
+        }
+        if (typeof viewerApi.fitViewTo === 'function') {
+          await Promise.resolve(viewerApi.fitViewTo(target));
+        }
       }
     } catch (error) {
-      console.warn('Failed to highlight IDS rule', error);
+      console.error('Failed to highlight IDS rule', error);
     }
   }, [viewerApi]);
 
   const handleRowClick = useCallback(async (row: DetailRow) => {
-    if (!viewerApi) return;
+    if (!viewerApi || !row.globalId) return;
     try {
-      await Promise.resolve(viewerApi.clearColors());
-      if (viewerApi.clearIsolation) {
+      // Ensure viewer API methods exist before calling
+      if (typeof viewerApi.clearColors === 'function') {
+        await Promise.resolve(viewerApi.clearColors());
+      }
+      if (typeof viewerApi.clearIsolation === 'function') {
         await Promise.resolve(viewerApi.clearIsolation());
       }
-      await Promise.resolve(viewerApi.color([row.globalId], { r: 1, g: 0.6, b: 0, a: 1 }));
-      await Promise.resolve(viewerApi.isolate([row.globalId]));
-      await Promise.resolve(viewerApi.fitViewTo([row.globalId]));
+      if (typeof viewerApi.color === 'function') {
+        await Promise.resolve(viewerApi.color([row.globalId], { r: 1, g: 0.6, b: 0, a: 1 }));
+      }
+      if (typeof viewerApi.isolate === 'function') {
+        await Promise.resolve(viewerApi.isolate([row.globalId]));
+      }
+      if (typeof viewerApi.fitViewTo === 'function') {
+        await Promise.resolve(viewerApi.fitViewTo([row.globalId]));
+      }
     } catch (error) {
-      console.warn('Failed to focus element for IDS row', error);
+      console.error('Failed to focus element for IDS row', error);
     }
   }, [viewerApi]);
 
@@ -571,10 +587,20 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
         >
           <Typography variant="subtitle1">IDS Checker</Typography>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <IconButton size="small" onClick={() => setIsMinimized((prev) => !prev)} color="inherit">
+            <IconButton 
+              size="small" 
+              onClick={() => setIsMinimized((prev) => !prev)} 
+              color="inherit"
+              title={isMinimized ? "Expand panel" : "Minimize panel"}
+            >
               {isMinimized ? <OpenInFullIcon /> : <MinimizeIcon />}
             </IconButton>
-            <IconButton size="small" onClick={() => { setIsMinimized(false); onClose(); }} color="inherit">
+            <IconButton 
+              size="small" 
+              onClick={() => { setIsMinimized(false); onClose(); }} 
+              color="inherit"
+              title="Close IDS Checker"
+            >
               <CloseIcon />
             </IconButton>
           </Box>
@@ -758,7 +784,14 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                   />
                   <FormControl size="small" sx={{ minWidth: 120 }}>
                     <InputLabel>Status</InputLabel>
-                    <Select value={statusFilter} label="Status" onChange={(event) => setStatusFilter(event.target.value as DetailStatusFilter)}>
+                    <Select 
+                      value={statusFilter} 
+                      label="Status" 
+                      onChange={(event) => setStatusFilter(event.target.value as DetailStatusFilter)}
+                      MenuProps={{
+                        sx: { zIndex: 4000 }
+                      }}
+                    >
                       <MenuItem value="ALL">All</MenuItem>
                       <MenuItem value="FAILED">Failed</MenuItem>
                       <MenuItem value="PASSED">Passed</MenuItem>
@@ -767,7 +800,14 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                   </FormControl>
                   <FormControl size="small" sx={{ minWidth: 160 }}>
                     <InputLabel>Rule</InputLabel>
-                    <Select value={ruleFilter} label="Rule" onChange={(event) => setRuleFilter(event.target.value)}>
+                    <Select 
+                      value={ruleFilter} 
+                      label="Rule" 
+                      onChange={(event) => setRuleFilter(event.target.value)}
+                      MenuProps={{
+                        sx: { zIndex: 4000 }
+                      }}
+                    >
                       <MenuItem value="ALL">All rules</MenuItem>
                       {rules.map((rule) => (
                         <MenuItem key={rule.id} value={rule.id}>

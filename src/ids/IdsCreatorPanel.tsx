@@ -19,6 +19,7 @@ import SaveIcon from '@mui/icons-material/Save';
 import FileOpenIcon from '@mui/icons-material/FileOpen';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
@@ -38,6 +39,7 @@ export type IdsCreatorPanelProps = {
   onClose: () => void;
   viewerApi: ViewerApi | null;
   selectedItemData: Record<string, any> | null; // Live data from the selected element
+  onValidate?: (idsXml: string) => void;
 };
 
 const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
@@ -45,6 +47,7 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
   onClose,
   viewerApi,
   selectedItemData,
+  onValidate,
 }) => {
   const panelNodeRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -416,6 +419,21 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
     }
   }, [specifications, fileName]);
 
+  const handleValidate = useCallback(() => {
+    if (!onValidate) return;
+    if (specifications.length === 0) {
+      alert('Please add at least one specification before validating.');
+      return;
+    }
+    try {
+      const xmlString = generateIdsXml(specifications);
+      onValidate(xmlString);
+    } catch (error) {
+      console.error('Failed to generate IDS XML for validation:', error);
+      alert('Error: Could not generate IDS XML. See console for details.');
+    }
+  }, [specifications, onValidate]);
+
   const handleLoadIds = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -473,11 +491,41 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
             backgroundColor: 'secondary.main',
             color: 'white',
             cursor: 'move',
+            gap: 2,
           }}
         >
-          <Typography variant="subtitle1">IDS Creator: {fileName}</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
+            <Typography variant="subtitle1" sx={{ whiteSpace: 'nowrap' }}>IDS Creator:</Typography>
+            <TextField
+              value={fileName.replace(/\.ids$/, '')}
+              onChange={(e) => setFileName(e.target.value)}
+              variant="outlined"
+              size="small"
+              placeholder="filename"
+              sx={{
+                flex: 1,
+                maxWidth: 300,
+                '& .MuiOutlinedInput-root': {
+                  color: 'white',
+                  '& fieldset': {
+                    borderColor: 'rgba(255, 255, 255, 0.3)',
+                  },
+                  '&:hover fieldset': {
+                    borderColor: 'rgba(255, 255, 255, 0.5)',
+                  },
+                  '&.Mui-focused fieldset': {
+                    borderColor: 'rgba(255, 255, 255, 0.7)',
+                  },
+                },
+                '& .MuiInputBase-input': {
+                  py: 0.75,
+                },
+              }}
+            />
+            <Typography variant="body2" sx={{ color: 'rgba(255, 255, 255, 0.7)' }}>.ids</Typography>
+          </Box>
           <Box>
-            {/* Add Load and Save buttons */}
+            {/* Add Load, Save, and Validate buttons */}
             <input ref={fileInputRef} type="file" accept=".ids, .xml" style={{ display: 'none' }} onChange={handleLoadIds} />
             <IconButton size="small" color="inherit" title="Load IDS File" onClick={() => fileInputRef.current?.click()}>
               <FileOpenIcon />
@@ -485,10 +533,31 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
             <IconButton size="small" color="inherit" title="Save IDS File" onClick={handleSaveIds}>
               <SaveIcon />
             </IconButton>
-            <IconButton size="small" color="inherit" onClick={() => setIsMinimized((p) => !p)}>
+            {onValidate && (
+              <IconButton 
+                size="small" 
+                color="inherit" 
+                title="Validate in IDS Checker" 
+                onClick={handleValidate}
+                disabled={specifications.length === 0}
+              >
+                <PlayArrowIcon />
+              </IconButton>
+            )}
+            <IconButton 
+              size="small" 
+              color="inherit" 
+              onClick={() => setIsMinimized((p) => !p)}
+              title={isMinimized ? "Expand panel" : "Minimize panel"}
+            >
               {isMinimized ? <OpenInFullIcon /> : <MinimizeIcon />}
             </IconButton>
-            <IconButton size="small" color="inherit" onClick={onClose}>
+            <IconButton 
+              size="small" 
+              color="inherit" 
+              onClick={onClose}
+              title="Close IDS Creator"
+            >
               <CloseIcon />
             </IconButton>
           </Box>

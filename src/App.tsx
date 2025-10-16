@@ -741,8 +741,8 @@ const isLikelyNonElementForIds = (ifcClass: string, candidate: any): boolean => 
 };
 
 const FAVORITES_STORAGE_KEY = 'fragmentsViewer.favoritePropertyPaths';
-const MAX_DISPLAY_PROPERTY_ROWS = 200;
-const MAX_SEARCH_RESULTS = 200;
+const MAX_DISPLAY_PROPERTY_ROWS = 10000; // Increased limit - scrolling handles performance
+const MAX_SEARCH_RESULTS = 500;
 
 const readName = (value: any): string | undefined => {
   if (!value || typeof value !== 'object') return undefined;
@@ -1819,12 +1819,17 @@ const App: React.FC = () => {
       for (const [modelId, localIds] of grouped) {
         const model = fragments.list.get(modelId);
         if (!model || !localIds.length) continue;
-        if (typeof highlighter.highlightById === 'function') {
-          await Promise.resolve(highlighter.highlightById(model, localIds, colorHex));
-        } else if (typeof highlighter.highlightByID === 'function') {
-          await Promise.resolve(highlighter.highlightByID(model, localIds, colorHex));
-        } else if (typeof highlighter.add === 'function') {
-          highlighter.add(model, localIds, colorHex);
+        try {
+          if (typeof highlighter.highlightById === 'function') {
+            await Promise.resolve(highlighter.highlightById(model, localIds, colorHex));
+          } else if (typeof highlighter.highlightByID === 'function') {
+            await Promise.resolve(highlighter.highlightByID(model, localIds, colorHex));
+          } else if (typeof highlighter.add === 'function') {
+            highlighter.add(model, localIds, colorHex);
+          }
+        } catch (error) {
+          console.error(`Failed to highlight model ${modelId}:`, error);
+          // Continue with other models even if one fails
         }
       }
     },
@@ -1944,6 +1949,28 @@ const App: React.FC = () => {
       }
       return next;
     });
+  }, []);
+
+  const handleValidateFromCreator = useCallback(async (idsXml: string) => {
+    try {
+      // Set the XML in the IDS store
+      const { setIdsXmlText, runCheck } = await import('./ids/ids.store').then(m => m.idsStore);
+      setIdsXmlText(idsXml);
+      
+      // Open the IDS Checker panel
+      setIsIdsOpen(true);
+      setIdsExpandSignal((value) => value + 1);
+      
+      // Run the validation after a short delay to ensure the panel is open
+      setTimeout(async () => {
+        if (viewerApiRef.current) {
+          await runCheck(viewerApiRef.current);
+        }
+      }, 100);
+    } catch (error) {
+      console.error('Failed to validate from IDS Creator:', error);
+      alert('Error: Could not run validation. See console for details.');
+    }
   }, []);
 
   useEffect(() => {
@@ -3397,10 +3424,20 @@ const App: React.FC = () => {
             >
               <Typography variant="subtitle1">Model Explorer</Typography>
               <Box>
-                <IconButton size="small" color="inherit" onClick={toggleExplorerMinimized}>
+                <IconButton 
+                  size="small" 
+                  color="inherit" 
+                  onClick={toggleExplorerMinimized}
+                  title={isExplorerMinimized ? "Expand panel" : "Minimize panel"}
+                >
                   {isExplorerMinimized ? <OpenInFullIcon /> : <MinimizeIcon />}
                 </IconButton>
-                <IconButton size="small" color="inherit" onClick={handleExplorerClose}>
+                <IconButton 
+                  size="small" 
+                  color="inherit" 
+                  onClick={handleExplorerClose}
+                  title="Close Model Explorer"
+                >
                   <CloseIcon />
                 </IconButton>
               </Box>
@@ -3452,7 +3489,11 @@ const App: React.FC = () => {
                 >
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <Typography variant="subtitle2">Loaded Models</Typography>
-                    <IconButton size="small" onClick={() => setIsModelsSectionCollapsed((prev) => !prev)}>
+                    <IconButton 
+                      size="small" 
+                      onClick={() => setIsModelsSectionCollapsed((prev) => !prev)}
+                      title={isModelsSectionCollapsed ? "Expand Loaded Models" : "Collapse Loaded Models"}
+                    >
                       {isModelsSectionCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
                     </IconButton>
                   </Box>
@@ -3508,7 +3549,11 @@ const App: React.FC = () => {
                   >
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
                       <Typography variant="subtitle2">Selection Properties</Typography>
-                      <IconButton size="small" onClick={() => setIsSelectionPropertiesCollapsed((prev) => !prev)}>
+                      <IconButton 
+                        size="small" 
+                        onClick={() => setIsSelectionPropertiesCollapsed((prev) => !prev)}
+                        title={isSelectionPropertiesCollapsed ? "Expand Selection Properties" : "Collapse Selection Properties"}
+                      >
                         {isSelectionPropertiesCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
                       </IconButton>
                     </Box>
@@ -3551,28 +3596,27 @@ const App: React.FC = () => {
                           sx={{
                             display: selectedPropertyTab === 'favorites' ? 'flex' : 'none',
                             flexDirection: 'column',
-                            gap: 1,
                             flex: selectedPropertyTab === 'favorites' ? 1 : 0,
-                            minHeight: selectedPropertyTab === 'favorites' ? 0 : 'auto',
-                            overflow: 'hidden',
+                            minHeight: 0,
                           }}
                         >
                           {favoriteRows.length ? (
-                            <Paper
-                              variant="outlined"
-                              sx={{
-                                p: 1,
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: 0.75,
-                                flex: 1,
-                                minHeight: 0,
-                                overflowY: 'auto',
-                                height: '100%',
-                              }}
-                            >
-                              {favoriteRows.map(renderPropertyRow)}
-                            </Paper>
+                            <Box sx={{ position: 'relative', flex: 1, minHeight: 200 }}>
+                              <Paper
+                                variant="outlined"
+                                sx={{
+                                  position: 'absolute',
+                                  inset: 0,
+                                  p: 1,
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 0.75,
+                                  overflow: 'auto',
+                                }}
+                              >
+                                {favoriteRows.map(renderPropertyRow)}
+                              </Paper>
+                            </Box>
                           ) : (
                             <Paper
                               variant="outlined"
@@ -3583,7 +3627,6 @@ const App: React.FC = () => {
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 textAlign: 'center',
-                                height: '100%',
                               }}
                             >
                               <Typography variant="body2" color="text.secondary">
@@ -3594,7 +3637,7 @@ const App: React.FC = () => {
                             </Paper>
                           )}
                           {missingFavoriteCount > 0 && favoritePropertyPaths.length > 0 && (
-                            <Alert severity="info" variant="outlined" sx={{ flexShrink: 0 }}>
+                            <Alert severity="info" variant="outlined" sx={{ position: 'absolute', bottom: 0, left: 0, right: 0, m: 1, zIndex: 1 }}>
                               {missingFavoriteCount === 1
                                 ? '1 favourite property is not available for this selection.'
                                 : `${missingFavoriteCount} favourite properties are not available for this selection.`}
@@ -3608,13 +3651,11 @@ const App: React.FC = () => {
                           sx={{
                             display: selectedPropertyTab === 'all' ? 'flex' : 'none',
                             flexDirection: 'column',
-                            gap: 1,
                             flex: selectedPropertyTab === 'all' ? 1 : 0,
                             minHeight: 0,
-                            overflow: 'hidden',
                           }}
                         >
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0, mb: 1 }}>
                             <TextField
                               size="small"
                               fullWidth
@@ -3668,22 +3709,22 @@ const App: React.FC = () => {
                             </Paper>
                           ) : hasSelectionSearch ? (
                             matchedPropertyRows.length ? (
-                             
-                              <Paper
-                                variant="outlined"
-                                sx={{
-                                  flex: 1,
-                                  overflowY: 'auto',
-                                  p: 1,
-                                  display: 'flex',
-                                  flexDirection: 'column',
-                                  gap: 0.75,
-                                  minHeight: 0,
-                                  height: '100%',
-                                }}
-                              >
-                                {matchedPropertyRows.map(renderPropertyRow)}
-                              </Paper>
+                              <Box sx={{ position: 'relative', flex: 1, minHeight: 200 }}>
+                                <Paper
+                                  variant="outlined"
+                                  sx={{
+                                    position: 'absolute',
+                                    inset: 0,
+                                    p: 1,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: 0.75,
+                                    overflow: 'auto',
+                                  }}
+                                >
+                                  {matchedPropertyRows.map(renderPropertyRow)}
+                                </Paper>
+                              </Box>
                             ) : (
                               <Paper
                                 variant="outlined"
@@ -3694,7 +3735,6 @@ const App: React.FC = () => {
                                   alignItems: 'center',
                                   justifyContent: 'center',
                                   textAlign: 'center',
-                                  height: '100%',
                                 }}
                               >
                                 <Typography variant="body2" color="text.secondary">
@@ -3703,28 +3743,27 @@ const App: React.FC = () => {
                               </Paper>
                             )
                           ) : (
-                            <React.Fragment>
+                            <Box sx={{ position: 'relative', flex: 1, minHeight: 200 }}>
                               <Paper
                                 variant="outlined"
                                 sx={{
-                                  flex: 1,
-                                  overflowY: 'auto',
+                                  position: 'absolute',
+                                  inset: 0,
                                   p: 1,
                                   display: 'flex',
                                   flexDirection: 'column',
                                   gap: 0.75,
-                                  minHeight: 0,
-                                  height: '100%',
+                                  overflow: 'auto',
                                 }}
                               >
                                 {limitedPropertyRows.map(renderPropertyRow)}
                               </Paper>
                               {truncatedPropertyCount > 0 && (
-                                <Alert severity="info" variant="outlined" sx={{ flexShrink: 0 }}>
+                                <Alert severity="info" variant="outlined" sx={{ position: 'absolute', bottom: 0, left: 0, right: 0, m: 1, zIndex: 1 }}>
                                   {`Displaying the first ${limitedPropertyRows.length} properties. ${truncatedPropertyCount} more not shown.`}
                                 </Alert>
                               )}
-                            </React.Fragment>
+                            </Box>
                           )}
                         </Box>
                       </Box>
@@ -3750,7 +3789,11 @@ const App: React.FC = () => {
                   >
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
                       <Typography variant="subtitle2">Model Tree</Typography>
-                      <IconButton size="small" onClick={() => setIsModelTreeCollapsed((prev) => !prev)}>
+                      <IconButton 
+                        size="small" 
+                        onClick={() => setIsModelTreeCollapsed((prev) => !prev)}
+                        title={isModelTreeCollapsed ? "Expand Model Tree" : "Collapse Model Tree"}
+                      >
                         {isModelTreeCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
                       </IconButton>
                     </Box>
@@ -3839,8 +3882,26 @@ const App: React.FC = () => {
         </Draggable>
       ) : (
         <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 90, zIndex: 1700, borderRadius: '50%' }}>
-          <IconButton onClick={handleExplorerOpen}>
+          <IconButton onClick={handleExplorerOpen} title="Open Model Explorer">
             <ViewListIcon />
+          </IconButton>
+        </Paper>
+      )}
+
+      {/* IDS Checker floating button */}
+      {!isIdsOpen && (
+        <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 150, zIndex: 1700, borderRadius: '50%' }}>
+          <IconButton onClick={openIdsPanel} title="Open IDS Checker">
+            <RuleIcon />
+          </IconButton>
+        </Paper>
+      )}
+
+      {/* IDS Creator floating button */}
+      {!isIdsCreatorOpen && (
+        <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 210, zIndex: 1700, borderRadius: '50%' }}>
+          <IconButton onClick={() => setIsIdsCreatorOpen(true)} title="Open IDS Creator">
+            <EditNoteIcon />
           </IconButton>
         </Paper>
       )}
@@ -3930,6 +3991,7 @@ const App: React.FC = () => {
         onClose={() => setIsIdsCreatorOpen(false)}
         viewerApi={viewerApi}
         selectedItemData={properties}
+        onValidate={handleValidateFromCreator}
       />
 
       <ChatWindow

@@ -264,7 +264,7 @@ ${question}`
   if (!isOpen) {
     return (
       <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 20, zIndex: 2100 }}>
-        <IconButton onClick={onOpen}>
+        <IconButton onClick={onOpen} title="Open BIM AI Assistant">
           <ChatIcon />
         </IconButton>
       </Paper>
@@ -307,10 +307,20 @@ ${question}`
         >
           <Typography variant="subtitle1">BIM AI Assistant</Typography>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <IconButton size="small" onClick={() => setIsMinimized(!isMinimized)} color="inherit">
+            <IconButton 
+              size="small" 
+              onClick={() => setIsMinimized(!isMinimized)} 
+              color="inherit"
+              title={isMinimized ? "Expand panel" : "Minimize panel"}
+            >
               {isMinimized ? <OpenInFull /> : <Minimize />}
             </IconButton>
-            <IconButton size="small" onClick={() => { setIsMinimized(false); onClose(); }} color="inherit">
+            <IconButton 
+              size="small" 
+              onClick={() => { setIsMinimized(false); onClose(); }} 
+              color="inherit"
+              title="Close BIM AI Assistant"
+            >
               <CloseIcon />
             </IconButton>
           </Box>
