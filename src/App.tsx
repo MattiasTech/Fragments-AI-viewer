@@ -29,6 +29,7 @@ import RadioGroup from '@mui/material/RadioGroup';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import Radio from '@mui/material/Radio';
 import Alert from '@mui/material/Alert';
+import Slider from '@mui/material/Slider';
 import Draggable from 'react-draggable';
 import CloseIcon from '@mui/icons-material/Close';
 import MinimizeIcon from '@mui/icons-material/Minimize';
@@ -43,6 +44,13 @@ import StarIcon from '@mui/icons-material/Star';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
 import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import ContentCutIcon from '@mui/icons-material/ContentCut';
+import StraightenIcon from '@mui/icons-material/Straighten';
+import CropIcon from '@mui/icons-material/Crop';
+import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
+import ViewInArIcon from '@mui/icons-material/ViewInAr';
 import * as THREE from 'three';
 import Stats from 'stats.js';
 import ChatWindow, { SelectionCommand } from './ChatWindow';
@@ -1177,6 +1185,16 @@ const App: React.FC = () => {
   const [exportModelId, setExportModelId] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [isViewToolbarOpen, setIsViewToolbarOpen] = useState(false);
+  const [clippingPlanes, setClippingPlanes] = useState({ x: false, y: false, z: false });
+  const [clippingPositions, setClippingPositions] = useState({ x: 0, y: 0, z: 0 });
+  const [isClippingBoxActive, setIsClippingBoxActive] = useState(false);
+  const [isMeasuring, setIsMeasuring] = useState(false);
+  const isMeasuringRef = useRef(false);
+  const clippingPlanesRef = useRef<THREE.Plane[]>([]);
+  const clippingHelpersRef = useRef<Map<string, THREE.PlaneHelper>>(new Map());
+  const measurementToolRef = useRef<OBCF.LengthMeasurement | null>(null);
+  const [lastMeasurementValue, setLastMeasurementValue] = useState<string | null>(null);
 
   const getWorldCamera = useCallback((): OBC.OrthoPerspectiveCamera | null => {
     const world = worldRef.current;
@@ -2113,6 +2131,65 @@ const App: React.FC = () => {
 
       const hider = components.get(OBC.Hider);
       hiderRef.current = hider;
+
+      // Initialize measurement tool
+      try {
+        const measurementTool = components.get(OBCF.LengthMeasurement);
+        measurementTool.world = world;
+        
+        // Setup color and other properties
+        measurementTool.color = new THREE.Color('#ff0000'); // Red for better visibility
+        
+        // Setup snapDistance for better usability
+        if ('snapDistance' in measurementTool) {
+          (measurementTool as any).snapDistance = 0.5;
+        }
+        
+        // Enable snap preview to show where measurements will snap
+        if ('preview' in measurementTool) {
+          const preview = (measurementTool as any).preview;
+          if (preview) {
+            preview.enabled = true;
+            // Make the preview marker more visible
+            if (preview.color) {
+              preview.color = new THREE.Color('#00ff00'); // Green for snap preview
+            }
+          }
+        }
+        
+        // Try to configure the workingPlane for better visibility
+        if ('workingPlane' in measurementTool) {
+          const workingPlane = (measurementTool as any).workingPlane;
+          if (workingPlane && typeof workingPlane === 'object') {
+            workingPlane.visible = true;
+          }
+        }
+        
+        // Listen for measurement creation to log distance and update display
+        if ((measurementTool as any).list?.onItemAdded) {
+          (measurementTool as any).list.onItemAdded.add((line: any) => {
+            const distance = line.value || line.distance?.() || 0;
+            console.log(`✅ Measurement created: ${distance.toFixed(3)} units`);
+            
+            // Update the displayed measurement value
+            setLastMeasurementValue(distance.toFixed(3));
+            
+            // Try to make the dimension more visible
+            if (line.dimensionLabel) {
+              line.dimensionLabel.visible = true;
+            }
+          });
+        }
+        
+        // Start disabled - will enable when user clicks the button
+        measurementTool.enabled = false;
+        
+        measurementToolRef.current = measurementTool;
+        console.log('✅ Measurement tool initialized:', measurementTool);
+        console.log('Measurement tool properties:', Object.keys(measurementTool));
+      } catch (error) {
+        console.error('Failed to initialize measurement tool:', error);
+      }
 
       highlighter.events.select.onHighlight.add(highlightHandler);
       highlighter.events.select.onClear.add(clearHandler);
@@ -3208,7 +3285,22 @@ const App: React.FC = () => {
     };
     const onClick = async (ev: MouseEvent) => {
       setContextMenu(null);
-      await pickAt(ev.clientX, ev.clientY);
+      
+      // Always allow measurement tool events to pass through
+      // Just skip our own selection logic when measuring
+      if (!isMeasuringRef.current) {
+        await pickAt(ev.clientX, ev.clientY);
+      }
+    };
+    const onDoubleClick = () => {
+      // According to That Open Company docs, double-click creates measurements
+      if (isMeasuringRef.current) {
+        const measurementTool = measurementToolRef.current;
+        if (measurementTool && typeof measurementTool.create === 'function') {
+          console.log('📏 Creating measurement point');
+          measurementTool.create();
+        }
+      }
     };
     const onContextMenu = (ev: MouseEvent) => {
       ev.preventDefault();
@@ -3220,13 +3312,29 @@ const App: React.FC = () => {
       setContextMenu({ mouseX: ev.clientX + 2, mouseY: ev.clientY - 6 });
     };
     // Use capture on pointerdown to avoid controls stopping propagation
+    // Keyboard handler for deleting measurements
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isMeasuringRef.current && (event.code === 'Delete' || event.code === 'Backspace')) {
+        const measurementTool = measurementToolRef.current;
+        if (measurementTool && typeof measurementTool.delete === 'function') {
+          console.log('Deleting measurement under cursor');
+          measurementTool.delete();
+        }
+      }
+    };
+    
     dom.addEventListener('pointerdown', onPointerDown, { capture: true } as AddEventListenerOptions);
     dom.addEventListener('click', onClick);
+    dom.addEventListener('dblclick', onDoubleClick);
     dom.addEventListener('contextmenu', onContextMenu);
+    window.addEventListener('keydown', onKeyDown);
+    
     return () => {
       dom.removeEventListener('pointerdown', onPointerDown, { capture: true } as AddEventListenerOptions);
       dom.removeEventListener('click', onClick);
+      dom.removeEventListener('dblclick', onDoubleClick);
       dom.removeEventListener('contextmenu', onContextMenu);
+      window.removeEventListener('keydown', onKeyDown);
       // Cleanup marker
       try {
         const marker = selectionMarkerRef.current;
@@ -3265,6 +3373,293 @@ const App: React.FC = () => {
     } else if (threeCamera) {
       threeCamera.position.set(10, 10, 10);
       threeCamera.lookAt(0, 0, 0);
+    }
+  }, []);
+
+  const toggleClippingPlane = useCallback((axis: 'x' | 'y' | 'z') => {
+    setClippingPlanes((prev) => {
+      const newState = { ...prev, [axis]: !prev[axis] };
+      
+      // Update Three.js clipping planes
+      const world = worldRef.current;
+      if (!world) return newState;
+      
+      const renderer = world.renderer?.three;
+      const scene = world.scene?.three;
+      if (!renderer || !scene) return newState;
+      
+      const planes: THREE.Plane[] = [];
+      const helpers = clippingHelpersRef.current;
+      
+      // Remove old helper if toggling off
+      if (!newState[axis]) {
+        const helper = helpers.get(axis);
+        if (helper) {
+          scene.remove(helper);
+          helper.dispose();
+          helpers.delete(axis);
+        }
+      }
+      
+      // Add planes and helpers for active axes
+      if (newState.x) {
+        const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), clippingPositions.x);
+        planes.push(plane);
+        if (!helpers.has('x')) {
+          const helper = new THREE.PlaneHelper(plane, 10, 0xff0000);
+          scene.add(helper);
+          helpers.set('x', helper);
+        }
+      }
+      if (newState.y) {
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), clippingPositions.y);
+        planes.push(plane);
+        if (!helpers.has('y')) {
+          const helper = new THREE.PlaneHelper(plane, 10, 0x00ff00);
+          scene.add(helper);
+          helpers.set('y', helper);
+        }
+      }
+      if (newState.z) {
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), clippingPositions.z);
+        planes.push(plane);
+        if (!helpers.has('z')) {
+          const helper = new THREE.PlaneHelper(plane, 10, 0x0000ff);
+          scene.add(helper);
+          helpers.set('z', helper);
+        }
+      }
+      
+      renderer.clippingPlanes = planes;
+      renderer.localClippingEnabled = planes.length > 0;
+      clippingPlanesRef.current = planes;
+      
+      return newState;
+    });
+  }, [clippingPositions]);
+
+  const updateClippingPosition = useCallback((axis: 'x' | 'y' | 'z', value: number) => {
+    setClippingPositions((prev) => {
+      const newPositions = { ...prev, [axis]: value };
+      
+      // Update the plane and helper
+      const world = worldRef.current;
+      if (!world) return newPositions;
+      
+      const renderer = world.renderer?.three;
+      if (!renderer) return newPositions;
+      
+      const planes: THREE.Plane[] = [];
+      const helpers = clippingHelpersRef.current;
+      
+      if (clippingPlanes.x) {
+        const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), newPositions.x);
+        planes.push(plane);
+        const helper = helpers.get('x');
+        if (helper) {
+          helper.plane.constant = newPositions.x;
+        }
+      }
+      if (clippingPlanes.y) {
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), newPositions.y);
+        planes.push(plane);
+        const helper = helpers.get('y');
+        if (helper) {
+          helper.plane.constant = newPositions.y;
+        }
+      }
+      if (clippingPlanes.z) {
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), newPositions.z);
+        planes.push(plane);
+        const helper = helpers.get('z');
+        if (helper) {
+          helper.plane.constant = newPositions.z;
+        }
+      }
+      
+      renderer.clippingPlanes = planes;
+      clippingPlanesRef.current = planes;
+      
+      return newPositions;
+    });
+  }, [clippingPlanes]);
+
+  const toggleClippingBox = useCallback(() => {
+    setIsClippingBoxActive((prev) => {
+      const newState = !prev;
+      
+      // For clipping box, we'd typically enable all three planes
+      // This is a simplified implementation
+      if (newState) {
+        setClippingPlanes({ x: true, y: true, z: true });
+      } else {
+        setClippingPlanes({ x: false, y: false, z: false });
+      }
+      
+      return newState;
+    });
+  }, []);
+
+  const toggleMeasurement = useCallback(() => {
+    console.log('🎯 toggleMeasurement called');
+    setIsMeasuring((prev) => {
+      const newState = !prev;
+      isMeasuringRef.current = newState;
+      
+      const measurementTool = measurementToolRef.current;
+      console.log('Measurement tool:', measurementTool);
+      console.log('New state:', newState);
+      
+      if (measurementTool) {
+        measurementTool.enabled = newState;
+        console.log('Measurement tool enabled set to:', newState);
+        console.log('Measurement tool world:', measurementTool.world);
+        console.log('Measurement tool properties:', {
+          enabled: measurementTool.enabled,
+          world: !!measurementTool.world,
+          // Check if it has the list of measurements
+          list: (measurementTool as any).list?.size || 0
+        });
+        
+        if (!newState) {
+          try {
+            // Clear all measurements when disabling
+            if ((measurementTool as any).list && typeof (measurementTool as any).list.clear === 'function') {
+              (measurementTool as any).list.clear();
+              console.log('All measurements cleared');
+            }
+            // Clear the displayed measurement value
+            setLastMeasurementValue(null);
+          } catch (error) {
+            console.warn('Failed to clear measurements:', error);
+          }
+        } else {
+          console.log('📏 Measurement mode activated - DOUBLE-CLICK two points on the model to measure distance');
+        }
+      } else {
+        console.warn('⚠️ Measurement tool not initialized!');
+      }
+      
+      return newState;
+    });
+  }, []);
+
+  const clearAllClipping = useCallback(() => {
+    setClippingPlanes({ x: false, y: false, z: false });
+    setClippingPositions({ x: 0, y: 0, z: 0 });
+    setIsClippingBoxActive(false);
+    
+    const world = worldRef.current;
+    if (world) {
+      const renderer = world.renderer?.three;
+      const scene = world.scene?.three;
+      if (renderer) {
+        renderer.clippingPlanes = [];
+        renderer.localClippingEnabled = false;
+      }
+      
+      // Remove all helpers
+      if (scene) {
+        const helpers = clippingHelpersRef.current;
+        helpers.forEach((helper) => {
+          scene.remove(helper);
+          helper.dispose();
+        });
+        helpers.clear();
+      }
+    }
+    clippingPlanesRef.current = [];
+  }, []);
+
+  const setCameraView = useCallback((view: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso') => {
+    console.log('setCameraView called with view:', view);
+    const world = worldRef.current;
+    const fragments = fragmentsRef.current;
+    const id = currentModelIdRef.current;
+    const camera = getWorldCamera();
+    const threeCamera = camera?.three;
+    
+    console.log('Debug:', { hasWorld: !!world, hasFragments: !!fragments, id, hasCamera: !!camera, hasThreeCamera: !!threeCamera });
+    
+    if (!threeCamera || !world || !fragments || !id) {
+      console.log('Early return: missing dependencies');
+      return;
+    }
+
+    // Get the current model
+    const record = fragments.list.get(id);
+    console.log('Model record:', record);
+    if (!record) {
+      console.log('Early return: no record found for id:', id);
+      return;
+    }
+
+    // Calculate bounding box from current model
+    const bbox = new THREE.Box3().setFromObject(record.object);
+    console.log('Bounding box:', bbox, 'isEmpty:', bbox.isEmpty());
+    if (bbox.isEmpty()) {
+      console.log('Early return: bounding box is empty');
+      return;
+    }
+
+    // Get center and size
+    const center = new THREE.Vector3();
+    const size = new THREE.Vector3();
+    bbox.getCenter(center);
+    bbox.getSize(size);
+    
+    // Calculate distance based on model size (add 100% padding for better view)
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const distance = maxDim * 2 || 20; // Fallback to 20 if no models
+
+    let position: THREE.Vector3;
+
+    switch (view) {
+      case 'top':
+        position = new THREE.Vector3(center.x, center.y + distance, center.z);
+        break;
+      case 'bottom':
+        position = new THREE.Vector3(center.x, center.y - distance, center.z);
+        break;
+      case 'front':
+        position = new THREE.Vector3(center.x, center.y, center.z + distance);
+        break;
+      case 'back':
+        position = new THREE.Vector3(center.x, center.y, center.z - distance);
+        break;
+      case 'left':
+        position = new THREE.Vector3(center.x - distance, center.y, center.z);
+        break;
+      case 'right':
+        position = new THREE.Vector3(center.x + distance, center.y, center.z);
+        break;
+      case 'iso':
+        position = new THREE.Vector3(
+          center.x + distance * 0.7,
+          center.y + distance * 0.7,
+          center.z + distance * 0.7
+        );
+        break;
+      default:
+        return;
+    }
+
+    // Use controls.setLookAt for smooth transition
+    const controls = camera?.controls;
+    if (controls && typeof controls.setLookAt === 'function') {
+      // Use setLookAt with animation for smooth camera movement
+      controls.setLookAt(
+        position.x, position.y, position.z,
+        center.x, center.y, center.z,
+        true // enable transition
+      );
+      console.log('Camera moved to:', view, 'position:', position, 'looking at:', center);
+    } else {
+      // Fallback to direct camera manipulation
+      threeCamera.position.copy(position);
+      threeCamera.lookAt(center);
+      threeCamera.updateProjectionMatrix();
+      console.log('Camera moved (fallback) to:', view);
     }
   }, []);
 
@@ -3346,12 +3741,6 @@ const App: React.FC = () => {
             title={isIdsCreatorOpen ? 'Close IDS Creator' : 'Open IDS Creator'}
           >
             IDS Creator
-          </Button>
-          <Button color="inherit" onClick={fitToCurrentModel} disabled={!modelLoaded} sx={{ mr: 1 }}>
-            Fit to Model
-          </Button>
-          <Button color="inherit" onClick={resetView} sx={{ mr: 1 }}>
-            Reset View
           </Button>
         </Toolbar>
       </AppBar>
@@ -3906,6 +4295,411 @@ const App: React.FC = () => {
         </Paper>
       )}
 
+      {/* View Controls Toolbar */}
+      {isViewToolbarOpen ? (
+        <Draggable
+          handle=".drag-handle"
+          defaultPosition={{ x: 20, y: -260 }}
+        >
+          <Paper 
+            elevation={8} 
+            sx={{ 
+              position: 'absolute',
+              bottom: 90,
+              padding: 1.5,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 1,
+              zIndex: 1600,
+              backgroundColor: 'rgba(245, 245, 245, 0.98)',
+              backdropFilter: 'blur(10px)',
+              borderRadius: 2,
+              cursor: 'move',
+              border: '1px solid rgba(0, 0, 0, 0.12)',
+            }}
+          >
+            <Box 
+              className="drag-handle"
+              sx={{ 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'center', 
+                mb: 0.5,
+                cursor: 'grab',
+                '&:active': { cursor: 'grabbing' }
+              }}
+            >
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <DragIndicatorIcon fontSize="small" sx={{ color: 'text.secondary' }} />
+                <Typography variant="caption" sx={{ fontWeight: 600, color: 'primary.main' }}>
+                  View Controls
+                </Typography>
+              </Box>
+              <IconButton 
+                size="small" 
+                onClick={() => setIsViewToolbarOpen(false)}
+                title="Close toolbar"
+                sx={{ ml: 1 }}
+              >
+                <CloseIcon fontSize="small" />
+              </IconButton>
+            </Box>
+
+          {/* Camera Controls */}
+          <Box sx={{ display: 'flex', gap: 0.5 }}>
+            <Tooltip title="Fit to model" PopperProps={{ sx: { zIndex: 9999 } }}>
+              <IconButton 
+                size="small" 
+                onClick={fitToCurrentModel}
+                disabled={!modelLoaded}
+                sx={{ 
+                  border: '2px solid',
+                  borderColor: 'rgba(0, 0, 0, 0.23)',
+                  backgroundColor: 'white',
+                  '&:hover': { backgroundColor: 'primary.main', color: 'white', borderColor: 'primary.main' },
+                  '&:disabled': { backgroundColor: 'rgba(0, 0, 0, 0.12)' }
+                }}
+              >
+                <CenterFocusStrongIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Reset view" PopperProps={{ sx: { zIndex: 9999 } }}>
+              <IconButton 
+                size="small" 
+                onClick={resetView}
+                sx={{ 
+                  border: '2px solid',
+                  borderColor: 'rgba(0, 0, 0, 0.23)',
+                  backgroundColor: 'white',
+                  '&:hover': { backgroundColor: 'primary.main', color: 'white', borderColor: 'primary.main' }
+                }}
+              >
+                <RestartAltIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+
+          {/* Camera View Presets */}
+          <Box sx={{ mt: 0.5 }}>
+            <Typography variant="caption" sx={{ color: 'text.primary', fontWeight: 600, display: 'block', mb: 0.5 }}>
+              View Presets
+            </Typography>
+            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 0.5 }}>
+              <Tooltip title="Top view" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <Button 
+                  size="small" 
+                  onClick={() => setCameraView('top')}
+                  variant="outlined"
+                  sx={{ 
+                    minWidth: 'auto',
+                    px: 0.5,
+                    fontSize: '0.7rem',
+                    '&:hover': { backgroundColor: 'primary.main', color: 'white' }
+                  }}
+                >
+                  Top
+                </Button>
+              </Tooltip>
+              <Tooltip title="Bottom view" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <Button 
+                  size="small" 
+                  onClick={() => setCameraView('bottom')}
+                  variant="outlined"
+                  sx={{ 
+                    minWidth: 'auto',
+                    px: 0.5,
+                    fontSize: '0.7rem',
+                    '&:hover': { backgroundColor: 'primary.main', color: 'white' }
+                  }}
+                >
+                  Bot
+                </Button>
+              </Tooltip>
+              <Tooltip title="Front view" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <Button 
+                  size="small" 
+                  onClick={() => setCameraView('front')}
+                  variant="outlined"
+                  sx={{ 
+                    minWidth: 'auto',
+                    px: 0.5,
+                    fontSize: '0.7rem',
+                    '&:hover': { backgroundColor: 'primary.main', color: 'white' }
+                  }}
+                >
+                  Frt
+                </Button>
+              </Tooltip>
+              <Tooltip title="Back view" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <Button 
+                  size="small" 
+                  onClick={() => setCameraView('back')}
+                  variant="outlined"
+                  sx={{ 
+                    minWidth: 'auto',
+                    px: 0.5,
+                    fontSize: '0.7rem',
+                    '&:hover': { backgroundColor: 'primary.main', color: 'white' }
+                  }}
+                >
+                  Bck
+                </Button>
+              </Tooltip>
+              <Tooltip title="Left view" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <Button 
+                  size="small" 
+                  onClick={() => setCameraView('left')}
+                  variant="outlined"
+                  sx={{ 
+                    minWidth: 'auto',
+                    px: 0.5,
+                    fontSize: '0.7rem',
+                    '&:hover': { backgroundColor: 'primary.main', color: 'white' }
+                  }}
+                >
+                  Left
+                </Button>
+              </Tooltip>
+              <Tooltip title="Right view" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <Button 
+                  size="small" 
+                  onClick={() => setCameraView('right')}
+                  variant="outlined"
+                  sx={{ 
+                    minWidth: 'auto',
+                    px: 0.5,
+                    fontSize: '0.7rem',
+                    '&:hover': { backgroundColor: 'primary.main', color: 'white' }
+                  }}
+                >
+                  Rgt
+                </Button>
+              </Tooltip>
+              <Tooltip title="Isometric view" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <Button 
+                  size="small" 
+                  onClick={() => setCameraView('iso')}
+                  variant="outlined"
+                  sx={{ 
+                    minWidth: 'auto',
+                    px: 0.5,
+                    fontSize: '0.7rem',
+                    gridColumn: 'span 2',
+                    '&:hover': { backgroundColor: 'success.main', color: 'white' }
+                  }}
+                >
+                  <ViewInArIcon fontSize="small" sx={{ mr: 0.5 }} />
+                  ISO
+                </Button>
+              </Tooltip>
+            </Box>
+          </Box>
+
+          {/* Clipping Planes */}
+          <Box sx={{ mt: 0.5 }}>
+            <Typography variant="caption" sx={{ color: 'text.primary', fontWeight: 600, display: 'block', mb: 0.5 }}>
+              Clipping Planes
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 0.5 }}>
+              <Tooltip title="Toggle X-axis clipping" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={() => toggleClippingPlane('x')}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: clippingPlanes.x ? 'error.main' : 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: clippingPlanes.x ? 'error.main' : 'white',
+                    color: clippingPlanes.x ? 'white' : 'error.main',
+                    '&:hover': { 
+                      backgroundColor: clippingPlanes.x ? 'error.dark' : 'error.light', 
+                      borderColor: 'error.main',
+                      color: 'white'
+                    }
+                  }}
+                >
+                  <Typography variant="caption" sx={{ fontWeight: 600 }}>X</Typography>
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Toggle Y-axis clipping" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={() => toggleClippingPlane('y')}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: clippingPlanes.y ? 'success.main' : 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: clippingPlanes.y ? 'success.main' : 'white',
+                    color: clippingPlanes.y ? 'white' : 'success.main',
+                    '&:hover': { 
+                      backgroundColor: clippingPlanes.y ? 'success.dark' : 'success.light',
+                      borderColor: 'success.main',
+                      color: 'white'
+                    }
+                  }}
+                >
+                  <Typography variant="caption" sx={{ fontWeight: 600 }}>Y</Typography>
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Toggle Z-axis clipping" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={() => toggleClippingPlane('z')}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: clippingPlanes.z ? 'primary.main' : 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: clippingPlanes.z ? 'primary.main' : 'white',
+                    color: clippingPlanes.z ? 'white' : 'primary.main',
+                    '&:hover': { 
+                      backgroundColor: clippingPlanes.z ? 'primary.dark' : 'primary.light',
+                      borderColor: 'primary.main',
+                      color: 'white'
+                    }
+                  }}
+                >
+                  <Typography variant="caption" sx={{ fontWeight: 600 }}>Z</Typography>
+                </IconButton>
+              </Tooltip>
+            </Box>
+            
+            {/* Clipping Plane Position Sliders */}
+            {clippingPlanes.x && (
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mb: 0.5 }}>
+                  X Position: {clippingPositions.x.toFixed(1)}
+                </Typography>
+                <Slider
+                  value={clippingPositions.x}
+                  onChange={(_, value) => updateClippingPosition('x', value as number)}
+                  min={-50}
+                  max={50}
+                  step={0.1}
+                  size="small"
+                  sx={{ color: 'error.main' }}
+                />
+              </Box>
+            )}
+            {clippingPlanes.y && (
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="caption" sx={{ color: 'success.main', display: 'block', mb: 0.5 }}>
+                  Y Position: {clippingPositions.y.toFixed(1)}
+                </Typography>
+                <Slider
+                  value={clippingPositions.y}
+                  onChange={(_, value) => updateClippingPosition('y', value as number)}
+                  min={-50}
+                  max={50}
+                  step={0.1}
+                  size="small"
+                  sx={{ color: 'success.main' }}
+                />
+              </Box>
+            )}
+            {clippingPlanes.z && (
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="caption" sx={{ color: 'primary.main', display: 'block', mb: 0.5 }}>
+                  Z Position: {clippingPositions.z.toFixed(1)}
+                </Typography>
+                <Slider
+                  value={clippingPositions.z}
+                  onChange={(_, value) => updateClippingPosition('z', value as number)}
+                  min={-50}
+                  max={50}
+                  step={0.1}
+                  size="small"
+                  sx={{ color: 'primary.main' }}
+                />
+              </Box>
+            )}
+          </Box>
+
+          {/* Clipping Box */}
+          <Box sx={{ display: 'flex', gap: 0.5 }}>
+            <Tooltip title="Toggle clipping box" PopperProps={{ sx: { zIndex: 9999 } }}>
+              <IconButton 
+                size="small" 
+                onClick={toggleClippingBox}
+                sx={{ 
+                  border: '2px solid',
+                  borderColor: isClippingBoxActive ? 'warning.main' : 'rgba(0, 0, 0, 0.23)',
+                  backgroundColor: isClippingBoxActive ? 'warning.main' : 'white',
+                  color: isClippingBoxActive ? 'white' : 'warning.dark',
+                  '&:hover': { 
+                    backgroundColor: isClippingBoxActive ? 'warning.dark' : 'warning.light',
+                    borderColor: 'warning.main',
+                    color: 'white'
+                  }
+                }}
+              >
+                <CropIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Clear all clipping" PopperProps={{ sx: { zIndex: 9999 } }}>
+              <IconButton 
+                size="small" 
+                onClick={clearAllClipping}
+                disabled={!clippingPlanes.x && !clippingPlanes.y && !clippingPlanes.z && !isClippingBoxActive}
+                sx={{ 
+                  border: '2px solid',
+                  borderColor: 'rgba(0, 0, 0, 0.23)',
+                  backgroundColor: 'white',
+                  '&:hover': { backgroundColor: 'error.main', color: 'white', borderColor: 'error.main' },
+                  '&:disabled': { backgroundColor: 'rgba(0, 0, 0, 0.12)', borderColor: 'rgba(0, 0, 0, 0.12)' }
+                }}
+              >
+                <ContentCutIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+
+          {/* Measurement Tool */}
+          <Box sx={{ display: 'flex', gap: 0.5, mt: 0.5, alignItems: 'center' }}>
+            <Tooltip title={isMeasuring ? "Stop measuring" : "Start measuring"} PopperProps={{ sx: { zIndex: 9999 } }}>
+              <IconButton 
+                size="small" 
+                onClick={toggleMeasurement}
+                sx={{ 
+                  border: '2px solid',
+                  borderColor: isMeasuring ? 'success.main' : 'rgba(0, 0, 0, 0.23)',
+                  backgroundColor: isMeasuring ? 'success.main' : 'white',
+                  color: isMeasuring ? 'white' : 'success.dark',
+                  '&:hover': { 
+                    backgroundColor: isMeasuring ? 'success.dark' : 'success.light',
+                    borderColor: 'success.main',
+                    color: 'white'
+                  }
+                }}
+              >
+                <StraightenIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            {lastMeasurementValue && (
+              <Typography 
+                variant="caption" 
+                sx={{ 
+                  ml: 0.5,
+                  px: 1,
+                  py: 0.25,
+                  backgroundColor: 'success.light',
+                  color: 'success.dark',
+                  borderRadius: 1,
+                  fontWeight: 500,
+                  fontSize: '0.75rem',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {lastMeasurementValue} units
+              </Typography>
+            )}
+          </Box>
+        </Paper>
+        </Draggable>
+      ) : (
+        <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, left: 20, zIndex: 1600, borderRadius: '50%' }}>
+          <IconButton onClick={() => setIsViewToolbarOpen(true)} title="Open View Controls">
+            <CenterFocusStrongIcon />
+          </IconButton>
+        </Paper>
+      )}
+
       <Dialog open={exportDialogOpen} onClose={handleCloseExportDialog} fullWidth maxWidth="sm">
         <DialogTitle>Export properties</DialogTitle>
         <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -4011,9 +4805,30 @@ const App: React.FC = () => {
         disableAutoFocus
         disableAutoFocusItem
         disableEnforceFocus
-        MenuListProps={{ autoFocusItem: false }}
+        disablePortal
+        hideBackdrop
+        disableScrollLock
+        disableRestoreFocus
+        MenuListProps={{ 
+          autoFocusItem: false,
+          'aria-label': 'Element context menu'
+        }}
+        slotProps={{
+          paper: {
+            sx: { 
+              pointerEvents: 'auto',
+              boxShadow: 3
+            }
+          }
+        }}
+        TransitionProps={{
+          onExited: () => {
+            // Ensure focus is properly restored without aria-hidden conflicts
+            document.body.removeAttribute('aria-hidden');
+          }
+        }}
       >
-  <MenuItem onClick={hideSelected} disabled={selectedItems.length === 0}>
+        <MenuItem onClick={hideSelected} disabled={selectedItems.length === 0}>
           Hide selected element
         </MenuItem>
         <MenuItem onClick={resetHidden}>
