@@ -367,6 +367,24 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     setActiveTab('summary');
   }, [runCheck, viewerApi]);
 
+  const handleClose = useCallback(async () => {
+    // Clear any highlights when closing the panel
+    if (viewerApi) {
+      try {
+        if (typeof viewerApi.clearColors === 'function') {
+          await Promise.resolve(viewerApi.clearColors());
+        }
+        if (typeof viewerApi.clearIsolation === 'function') {
+          await Promise.resolve(viewerApi.clearIsolation());
+        }
+      } catch (error) {
+        console.warn('Failed to clear IDS highlights on close', error);
+      }
+    }
+    setIsMinimized(false);
+    onClose();
+  }, [viewerApi, onClose]);
+
   useEffect(() => {
     if (!isOpen) {
       setIsMinimized(false);
@@ -597,7 +615,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
             </IconButton>
             <IconButton 
               size="small" 
-              onClick={() => { setIsMinimized(false); onClose(); }} 
+              onClick={handleClose} 
               color="inherit"
               title="Close IDS Checker"
             >
@@ -627,7 +645,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                       startIcon={<FileUploadIcon />}
                       onClick={() => fileInputRef.current?.click()}
                     >
-                      Load IDS XML
+                      Load IDS File
                     </Button>
                   </Tooltip>
                   <Tooltip title="Insert a sample IDS specification" slotProps={tooltipSlotProps}>
@@ -643,7 +661,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".xml"
+                    accept=".xml,.ids"
                     multiple
                     style={{ display: 'none' }}
                     onChange={handleFilesSelected}

@@ -1145,6 +1145,7 @@ const App: React.FC = () => {
   const prevInstanceHighlightRef = useRef<{ mesh: THREE.InstancedMesh; index: number } | null>(null);
   const aiSelectionSeqRef = useRef(0);
   const highlighterRef = useRef<any>(null);
+  const idsOriginalColorsRef = useRef<Map<string, { material: any; color: THREE.Color | null }> | null>(null);
   const [explorerSize, setExplorerSize] = useState({ width: 360, height: 520 });
   const explorerResizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
   const explorerResizingRef = useRef(false);
@@ -1831,34 +1832,120 @@ const App: React.FC = () => {
       if (!globalIds.length) return;
       const highlighter = highlighterRef.current;
       const fragments = fragmentsRef.current;
-      if (!highlighter || !fragmentsReadyRef.current || !fragments) return;
+      const world = worldRef.current;
+      if (!highlighter || !fragmentsReadyRef.current || !fragments || !world) return;
+      
       const { grouped } = await groupLocalIdsByModel(globalIds);
-      const colorHex = new THREE.Color(rgba.r, rgba.g, rgba.b).getHex();
+      const color = new THREE.Color(rgba.r, rgba.g, rgba.b);
+      const colorHex = color.getHex();
+      
+      // Store original colors so we can restore them later
+      if (!idsOriginalColorsRef.current) {
+        idsOriginalColorsRef.current = new Map();
+      }
+      
       for (const [modelId, localIds] of grouped) {
         const model = fragments.list.get(modelId);
         if (!model || !localIds.length) continue;
+        
         try {
+          const ids = Array.from(localIds);
+          
+          // Use the exact same pattern as the working AI selection code
+          // Try highlightById first (lowercase 'd')
           if (typeof highlighter.highlightById === 'function') {
-            await Promise.resolve(highlighter.highlightById(model, localIds, colorHex));
-          } else if (typeof highlighter.highlightByID === 'function') {
-            await Promise.resolve(highlighter.highlightByID(model, localIds, colorHex));
-          } else if (typeof highlighter.add === 'function') {
-            highlighter.add(model, localIds, colorHex);
+            try {
+              await highlighter.highlightById(model, ids, colorHex);
+              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using highlightById`);
+              continue;
+            } catch (e) {
+              console.debug('highlightById failed:', e);
+            }
           }
+          
+          // Try highlightByID (uppercase 'ID')
+          if (typeof highlighter.highlightByID === 'function') {
+            try {
+              await highlighter.highlightByID(model, ids, colorHex);
+              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using highlightByID`);
+              continue;
+            } catch (e) {
+              console.debug('highlightByID failed:', e);
+            }
+          }
+          
+          // Try the new styles.set() API (replaces deprecated add method)
+          if (highlighter.styles && typeof highlighter.styles.set === 'function') {
+            try {
+              // Create a style name for this color
+              const styleName = `ids-color-${colorHex.toString(16).padStart(6, '0')}`;
+              
+              // Set the style for these IDs
+              highlighter.styles.set(styleName, {
+                color: color,
+                fillOpacity: 1
+              });
+              
+              // Apply the style to the model and IDs
+              if (typeof highlighter.select === 'function') {
+                highlighter.select(model, ids, styleName);
+              }
+              
+              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using styles.set`);
+              continue;
+            } catch (e) {
+              console.debug('styles.set failed:', e);
+            }
+          }
+          
+          // Fallback: deprecated add method (still works but shows warning)
+          if (typeof highlighter.add === 'function') {
+            try {
+              highlighter.add(model, ids, colorHex);
+              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using deprecated add method`);
+              continue;
+            } catch (e) {
+              console.debug('add failed:', e);
+            }
+          }
+          
+          console.warn(`Could not color model ${modelId} - all highlighter methods failed`);
         } catch (error) {
-          console.error(`Failed to highlight model ${modelId}:`, error);
+          console.error(`Failed to color model ${modelId}:`, error);
           // Continue with other models even if one fails
         }
       }
     },
     clearColors: async () => {
       const highlighter = highlighterRef.current;
+      
       if (!fragmentsReadyRef.current) return;
+      
+      // Clear using highlighter - this will remove all highlights
       try {
-        await Promise.resolve(highlighter?.clear?.());
+        if (highlighter) {
+          // Try the new clear API first
+          if (typeof highlighter.clear === 'function') {
+            await Promise.resolve(highlighter.clear());
+            console.log('Cleared highlighter colors using clear()');
+          }
+          
+          // Also clear any styles we created
+          if (highlighter.styles && typeof highlighter.styles.clear === 'function') {
+            highlighter.styles.clear();
+            console.log('Cleared highlighter styles');
+          }
+        }
       } catch (error) {
         console.warn('Failed to clear IDS highlights', error);
       }
+      
+      // Clear the stored original colors map
+      if (idsOriginalColorsRef.current) {
+        idsOriginalColorsRef.current.clear();
+      }
+      
+      // Clear instance highlight
       try {
         const prev = prevInstanceHighlightRef.current;
         if (prev && prev.mesh && prev.mesh.instanceColor) {
