@@ -2,6 +2,9 @@
 
 A powerful web-based 3D viewer for BIM models with integrated IDS (Information Delivery Specification) validation and AI-powered assistance. Built with React, Vite, Three.js, and That Open Engine libraries, it runs fully in the browser and is optimized for hosting on GitHub Pages.
 
+**All data is processed localy in the users browser PC, Phone, Tablet etc. (Exeption AI Chat, sends data to Google Gemini 2.5). NB: If the AI chat is not used no data leavs the users device.** 
+
+
 ## Features
 
 ### 🏗️ Model Viewing
