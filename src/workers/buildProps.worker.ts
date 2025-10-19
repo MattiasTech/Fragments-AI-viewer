@@ -444,10 +444,13 @@ const collectIfcPropertySetRows = (root: unknown): PropertyRow[] => {
       return;
     }
 
+    // Process property set containers first
+    let hasProcessedContainers = false;
     for (const key of PROPERTY_SET_CONTAINER_KEYS) {
       if (Object.prototype.hasOwnProperty.call(value, key)) {
         const container = (value as Record<string, unknown>)[key];
         processDeclarativeContainer(container);
+        hasProcessedContainers = true;
       }
     }
 
@@ -456,13 +459,44 @@ const collectIfcPropertySetRows = (root: unknown): PropertyRow[] => {
       emitPropertySetRows(meta, value);
     }
 
-    Object.values(value as Record<string, unknown>).forEach((child) => {
-      if (child && typeof child === 'object') traverse(child);
-    });
+    // Only traverse deeper if we haven't already processed property set containers
+    // and this isn't a property set itself (to avoid double processing)
+    if (!hasProcessedContainers && !isIfcPropertySet(value)) {
+      Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
+        // Skip known container keys and metadata keys to prevent duplication
+        if (PROPERTY_SET_CONTAINER_KEYS.includes(key as any)) return;
+        if (PROPERTY_SET_METADATA_KEYS.has(key)) return;
+        if (IFC_PROPERTY_COLLECTION_KEYS.includes(key as any)) return;
+        if (child && typeof child === 'object') traverse(child);
+      });
+    }
   };
 
   traverse(root);
-  return rows;
+  
+  // Aggressive deduplication pass: remove duplicate rows based on multiple strategies
+  const seen = new Map<string, PropertyRow>();
+  const labelValueSeen = new Set<string>();
+  
+  for (const row of rows) {
+    // Strategy 1: Exact match on label + value
+    const labelValueKey = `${row.label}::${row.value}`;
+    if (labelValueSeen.has(labelValueKey)) {
+      continue; // Skip duplicate
+    }
+    
+    // Strategy 2: Match on full property path including pset and property names
+    const fullKey = `${row.rawPsetName || 'unknown'}::${row.rawPropertyName || 'unknown'}::${row.value}`;
+    if (seen.has(fullKey)) {
+      continue; // Skip duplicate
+    }
+    
+    // This is a unique property, keep it
+    labelValueSeen.add(labelValueKey);
+    seen.set(fullKey, row);
+  }
+  
+  return Array.from(seen.values());
 };
 
 const readName = (value: unknown): string | undefined => {

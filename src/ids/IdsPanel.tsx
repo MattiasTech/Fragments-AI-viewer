@@ -24,6 +24,10 @@ import {
   Select,
   FormControl,
   InputLabel,
+  Radio,
+  RadioGroup,
+  FormControlLabel,
+  FormLabel,
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import MinimizeIcon from '@mui/icons-material/Minimize';
@@ -41,6 +45,7 @@ import ClearIcon from '@mui/icons-material/Clear';
 import type { DetailRow, IdsDocumentSource, Phase, RuleResult, ViewerApi } from './ids.types';
 import { useIdsActions, useIdsStore } from './ids.store';
 import { toCsv, toJson } from './ids.exports';
+import { idsDb } from './ids.db';
 
 const SAMPLE_IDS = `<ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS">
   <ids:specification ifcVersion="IFC4" name="Walls must have FireRating">
@@ -267,7 +272,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   const resizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
   const resizingRef = useRef(false);
 
-  const { setIdsXmlText, appendDocuments, clearResults, runCheck, filterRows } = useIdsActions();
+  const { setIdsXmlText, appendDocuments, clearResults, runCheck, filterRows, setValidateSelectedOnly } = useIdsActions();
 
   const idsXmlText = useIdsStore((store) => store.idsXmlText);
   const idsFileNames = useIdsStore((store) => store.idsFileNames);
@@ -278,11 +283,20 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   const rows = useIdsStore((store) => store.rows);
   const filteredRows = useIdsStore((store) => store.filteredRows);
   const error = useIdsStore((store) => store.error);
+  const validateSelectedOnly = useIdsStore((store) => store.validateSelectedOnly);
 
   const [activeTab, setActiveTab] = useState<'summary' | 'details'>('summary');
   const [detailSearch, setDetailSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<DetailStatusFilter>('ALL');
   const [ruleFilter, setRuleFilter] = useState<string>('ALL');
+
+  // Clean up old IndexedDB cache on component mount
+  useEffect(() => {
+    // Clean up cache older than 30 days on first mount
+    idsDb.clearOldCache().catch((error) => {
+      console.warn('Failed to clean old cache:', error);
+    });
+  }, []); // Empty dependency array = run once on mount
 
   const tooltipSlotProps = useMemo(() => ({
     popper: {
@@ -309,6 +323,9 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   let progressVariant: 'determinate' | 'indeterminate' = 'indeterminate';
   let progressValue: number | undefined;
   let progressCaption: string | undefined;
+  
+  // Calculate worker count for display
+  const workerCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
 
   if (phase === 'DONE') {
     progressVariant = 'determinate';
@@ -322,9 +339,20 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     const clampedDone = Math.min(progress.done, progress.total);
     progressVariant = 'determinate';
     progressValue = Math.max(0, Math.min((clampedDone / progress.total) * 100, 100));
-    progressCaption = `${clampedDone} / ${progress.total}`;
+    
+    // Enhanced progress caption showing parallel processing
+    if (phase === 'BUILDING_PROPERTIES') {
+      const percent = Math.round(progressValue);
+      progressCaption = `Processing with ${workerCount} parallel workers: ${percent}% (${clampedDone.toLocaleString()} / ${progress.total.toLocaleString()} elements)`;
+    } else {
+      progressCaption = `${clampedDone.toLocaleString()} / ${progress.total.toLocaleString()}`;
+    }
   } else if (isChecking) {
-    progressCaption = 'Working…';
+    if (phase === 'BUILDING_PROPERTIES') {
+      progressCaption = `Initializing ${workerCount} parallel workers…`;
+    } else {
+      progressCaption = 'Working…';
+    }
   }
 
   const progressProps =
@@ -360,6 +388,13 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     setIdsXmlText('', { fileNames: [] });
     clearResults();
   }, [setIdsXmlText, clearResults]);
+
+  const handleValidationModeChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      setValidateSelectedOnly(event.target.value === 'selected');
+    },
+    [setValidateSelectedOnly]
+  );
 
   const handleRunCheck = useCallback(async () => {
     if (!viewerApi) return;
@@ -438,6 +473,10 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     const failed = Array.from(new Set(rule.failed));
     const passed = Array.from(new Set(rule.passed));
     const target = failed.length ? failed : passed;
+    
+  // minimal logging: only log counts
+  console.debug(`[handleRuleHighlight] Highlighting rule: ${rule.title} (failed=${failed.length}, passed=${passed.length})`);
+    
     try {
       await Promise.resolve(viewerApi.clearColors());
       if (viewerApi.clearIsolation) {
@@ -470,22 +509,86 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     }
   }, [viewerApi]);
 
+  const handleHighlightAllByStatus = useCallback(async () => {
+    if (!viewerApi) return;
+    
+    // Collect all unique GlobalIds from all rules
+    const allPassed = new Set<string>();
+    const allFailed = new Set<string>();
+    const allNA = new Set<string>();
+    
+    for (const rule of rules) {
+      rule.passed.forEach(id => allPassed.add(id));
+      rule.failed.forEach(id => allFailed.add(id));
+      rule.na.forEach(id => allNA.add(id));
+    }
+    
+    const passedArray = Array.from(allPassed);
+    const failedArray = Array.from(allFailed);
+    const naArray = Array.from(allNA);
+    
+    try {
+      // Clear existing colors first
+      await Promise.resolve(viewerApi.clearColors());
+      if (viewerApi.clearIsolation) {
+        await Promise.resolve(viewerApi.clearIsolation());
+      }
+      
+      // Color elements by status
+      if (typeof viewerApi.color === 'function') {
+        // Red for failed
+        if (failedArray.length > 0) {
+          for (const chunk of chunkIds(failedArray)) {
+            if (!chunk.length) continue;
+            await Promise.resolve(viewerApi.color(chunk, { r: 1, g: 0.2, b: 0.2, a: 1 }));
+          }
+        }
+        
+        // Green for passed
+        if (passedArray.length > 0) {
+          for (const chunk of chunkIds(passedArray)) {
+            if (!chunk.length) continue;
+            await Promise.resolve(viewerApi.color(chunk, { r: 0.2, g: 0.7, b: 0.25, a: 1 }));
+          }
+        }
+        
+        // Yellow/Orange for N/A
+        if (naArray.length > 0) {
+          for (const chunk of chunkIds(naArray)) {
+            if (!chunk.length) continue;
+            await Promise.resolve(viewerApi.color(chunk, { r: 1, g: 0.7, b: 0.2, a: 1 }));
+          }
+        }
+      }
+      
+      console.log(`Highlighted ${passedArray.length} passed, ${failedArray.length} failed, ${naArray.length} N/A elements`);
+    } catch (error) {
+      console.error('Failed to highlight all elements by status', error);
+    }
+  }, [viewerApi, rules]);
+
   const handleRowClick = useCallback(async (row: DetailRow) => {
     if (!viewerApi || !row.globalId) return;
     try {
-      // Ensure viewer API methods exist before calling
+      // Clear any previous colors and isolation
       if (typeof viewerApi.clearColors === 'function') {
         await Promise.resolve(viewerApi.clearColors());
       }
       if (typeof viewerApi.clearIsolation === 'function') {
         await Promise.resolve(viewerApi.clearIsolation());
       }
+      
+      // Highlight the clicked element in bright orange for focus
       if (typeof viewerApi.color === 'function') {
         await Promise.resolve(viewerApi.color([row.globalId], { r: 1, g: 0.6, b: 0, a: 1 }));
       }
+      
+      // Isolate the element (hide all others)
       if (typeof viewerApi.isolate === 'function') {
         await Promise.resolve(viewerApi.isolate([row.globalId]));
       }
+      
+      // Zoom to the element
       if (typeof viewerApi.fitViewTo === 'function') {
         await Promise.resolve(viewerApi.fitViewTo([row.globalId]));
       }
@@ -667,6 +770,12 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                     onChange={handleFilesSelected}
                   />
                   <Box sx={{ flex: 1 }} />
+                  <FormControl component="fieldset" size="small">
+                    <RadioGroup row value={validateSelectedOnly ? 'selected' : 'all'} onChange={handleValidationModeChange}>
+                      <FormControlLabel value="all" control={<Radio size="small" />} label="All Elements" />
+                      <FormControlLabel value="selected" control={<Radio size="small" />} label="Selected Only" />
+                    </RadioGroup>
+                  </FormControl>
                   <Tooltip title="Validate the loaded model against IDS requirements" slotProps={tooltipSlotProps}>
                     <span>
                       <Button

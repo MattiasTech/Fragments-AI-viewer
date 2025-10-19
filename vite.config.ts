@@ -13,4 +13,24 @@ export default defineConfig({
       '@ids': path.resolve(__dirname, 'src/ids'),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep closely-related libraries together to avoid runtime circular
+        // reference errors in the generated chunks (React/MUI/common vendors).
+        // Strategy: three -> three-vendor, @thatopen -> thatopen-vendor,
+        // and everything else in node_modules into a single 'vendor' chunk.
+        manualChunks(id) {
+          if (!id) return;
+          if (id.includes('node_modules')) {
+            if (id.includes('three')) return 'three-vendor';
+            if (id.includes('@thatopen')) return 'thatopen-vendor';
+            // Group MUI and other UI libs with the main vendor chunk to avoid
+            // cross-chunk module init ordering/circular assignment issues.
+            return 'vendor';
+          }
+        },
+      },
+    },
+  },
 });

@@ -39,11 +39,18 @@ export type RequirementRule = {
 
 export interface ViewerApi {
   listGlobalIds(): Promise<string[]>;
+  getSelectedGlobalIds?(): Promise<string[]>; // Optional: Get only selected elements
   getElementProps(globalId: string): Promise<{
     ifcClass: string;
     psets: Record<string, Record<string, unknown>>;
     attributes?: Record<string, unknown>;
   }>;
+  getElementPropsFast?(globalId: string): Promise<{ // Fast path that doesn't require full cache
+    ifcClass: string;
+    psets: Record<string, Record<string, unknown>>;
+    attributes?: Record<string, unknown>;
+  }>;
+  addToCache?(globalIds: string[]): Promise<void>; // Add elements to cache incrementally
   isolate(globalIds: string[]): Promise<void> | void;
   color(globalIds: string[], rgba: RgbaColor): Promise<void> | void;
   clearColors(): Promise<void> | void;

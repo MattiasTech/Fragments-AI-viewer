@@ -501,12 +501,30 @@ const collectElementsDirect = async (
   globalIds: string[],
   options?: CollectElementsOptions
 ): Promise<ElementData[]> => {
+  console.log('🔍 [collectElementsDirect] START with', globalIds.length, 'globalIds');
+  console.log('🔍 [collectElementsDirect] Has getElementPropsFast?', !!viewerApi.getElementPropsFast);
+  
   const elements: ElementData[] = [];
   const total = Math.max(globalIds.length, 1);
   options?.onProgress?.({ done: 0, total });
-  for (const globalId of globalIds) {
+  
+  // Use fast path if available (for selected-only validation)
+  const useElementPropsMethod = viewerApi.getElementPropsFast || viewerApi.getElementProps;
+  const methodName = viewerApi.getElementPropsFast ? 'getElementPropsFast' : 'getElementProps';
+  console.log('🔍 [collectElementsDirect] Using method:', methodName);
+  
+  for (let i = 0; i < globalIds.length; i++) {
+    const globalId = globalIds[i];
+    console.log(`🔍 [collectElementsDirect] Processing ${i + 1}/${globalIds.length}: ${globalId}`);
     try {
-      const { ifcClass, psets, attributes } = await viewerApi.getElementProps(globalId);
+      console.log(`🔍 [collectElementsDirect] Calling ${methodName} for ${globalId}...`);
+      const { ifcClass, psets, attributes } = await useElementPropsMethod.call(viewerApi, globalId);
+      console.log(`🔍 [collectElementsDirect] Got props for ${globalId}:`, { 
+        ifcClass, 
+        psetCount: Object.keys(psets).length,
+        attrCount: Object.keys(attributes || {}).length 
+      });
+      
       const flattened = flattenPsets(psets);
       if (!('GlobalId' in flattened)) {
         flattened.GlobalId = globalId;
@@ -524,6 +542,7 @@ const collectElementsDirect = async (
         flattened.ifcClass = ifcClass;
       }
       elements.push({ GlobalId: globalId, ifcClass, properties: flattened });
+      console.log(`🔍 [collectElementsDirect] Added element ${i + 1}, total now: ${elements.length}`);
     } catch (error) {
       console.warn(`IDS adapter (direct) failed to load element ${globalId}`, error);
     }
@@ -531,6 +550,7 @@ const collectElementsDirect = async (
     options?.onProgress?.({ done, total });
   }
   options?.onProgress?.({ done: elements.length, total });
+  console.log('🔍 [collectElementsDirect] COMPLETE - returning', elements.length, 'elements');
   return elements;
 };
 
@@ -543,42 +563,56 @@ const buildWithWorker = async (
     throw new Error('Viewer API does not support iterating elements.');
   }
 
-  const worker = new Worker(new URL('../workers/buildProps.worker.ts', import.meta.url), { type: 'module' });
-  const elementsPromise = new Promise<ElementData[]>((resolve, reject) => {
-    const handleMessage = (event: MessageEvent<BuildWorkerResponse>) => {
-      const message = event.data;
-      if (!message) return;
-      if (message.type === 'error') {
-        cleanup();
-        reject(new Error(message.message || 'Property builder worker failed.'));
-        return;
-      }
-      if (message.type === 'progress') {
-        options?.onProgress?.({ done: message.done, total: message.total });
-        return;
-      }
-      if (message.type === 'done') {
-        cleanup();
-        resolve(message.elements ?? []);
-      }
-    };
-    const handleError = (event: ErrorEvent) => {
-      cleanup();
-      reject(event.error ?? new Error(event.message));
-    };
-    const cleanup = () => {
-      worker.removeEventListener('message', handleMessage);
-      worker.removeEventListener('error', handleError);
-    };
-    worker.addEventListener('message', handleMessage);
-    worker.addEventListener('error', handleError);
-  });
+  // Calculate optimal worker count (leave one core for UI)
+  const workerCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+  console.log(`🚀 Starting parallel property extraction with ${workerCount} workers`);
+  
+  // Create worker pool
+  const workers: Worker[] = [];
+  const workerPromises: Promise<ElementData[]>[] = [];
+  const workerResults: ElementData[][] = [];
+  
+  for (let i = 0; i < workerCount; i++) {
+    const worker = new Worker(new URL('../workers/buildProps.worker.ts', import.meta.url), { type: 'module' });
+    workers.push(worker);
+    
+    const promise = new Promise<ElementData[]>((resolve, reject) => {
+      const handleMessage = (event: MessageEvent<BuildWorkerResponse>) => {
+        const message = event.data;
+        if (!message) return;
+        if (message.type === 'error') {
+          reject(new Error(message.message || `Worker ${i} failed.`));
+          return;
+        }
+        if (message.type === 'progress') {
+          // Aggregate progress from all workers
+          const totalDone = workerResults.reduce((sum, results) => sum + results.length, 0) + message.done;
+          options?.onProgress?.({ done: totalDone, total: Math.max(total, totalDone) });
+          return;
+        }
+        if (message.type === 'done') {
+          workerResults[i] = message.elements ?? [];
+          resolve(message.elements ?? []);
+        }
+      };
+      const handleError = (event: ErrorEvent) => {
+        reject(event.error ?? new Error(event.message || `Worker ${i} error.`));
+      };
+      worker.addEventListener('message', handleMessage);
+      worker.addEventListener('error', handleError);
+    });
+    
+    workerPromises.push(promise);
+    worker.postMessage({ type: 'build-props', reset: true, total } satisfies BuildWorkerRequest);
+  }
 
-  worker.postMessage({ type: 'build-props', reset: true, total } satisfies BuildWorkerRequest);
   options?.onProgress?.({ done: 0, total });
 
   const seen = new Set<string>();
+  let workerIndex = 0;
+  
   try {
+    // Distribute batches across workers in round-robin fashion
     for await (const batch of viewerApi.iterElements({ batchSize: 128 })) {
       if (!Array.isArray(batch) || !batch.length) continue;
       const payload: Array<{ globalId: string; ifcClass?: string; data: Record<string, unknown> }> = [];
@@ -593,23 +627,39 @@ const buildWithWorker = async (
         payload.push({ globalId, ifcClass: ifcClassCandidate, data: rawData });
       });
       if (payload.length) {
-        worker.postMessage({ type: 'build-props', elements: payload } satisfies BuildWorkerRequest);
+        // Send to next worker in rotation
+        const targetWorker = workers[workerIndex];
+        targetWorker.postMessage({ type: 'build-props', elements: payload } satisfies BuildWorkerRequest);
+        workerIndex = (workerIndex + 1) % workerCount;
       }
     }
   } catch (error) {
-    worker.postMessage({ type: 'cancel' } satisfies BuildWorkerRequest);
-    worker.terminate();
+    // Cancel all workers
+    workers.forEach(worker => {
+      worker.postMessage({ type: 'cancel' } satisfies BuildWorkerRequest);
+      worker.terminate();
+    });
     throw error;
   }
 
-  worker.postMessage({ type: 'build-props', final: true } satisfies BuildWorkerRequest);
+  // Signal all workers to finalize
+  workers.forEach(worker => {
+    worker.postMessage({ type: 'build-props', final: true } satisfies BuildWorkerRequest);
+  });
 
   try {
-    const elements = await elementsPromise;
+    // Wait for all workers to complete
+    const allResults = await Promise.all(workerPromises);
+    
+    // Combine results from all workers
+    const elements = allResults.flat();
+    
+    console.log(`✅ Parallel processing complete: ${elements.length} elements processed by ${workerCount} workers`);
     options?.onProgress?.({ done: elements.length, total: Math.max(total, elements.length) });
     return elements;
   } finally {
-    worker.terminate();
+    // Terminate all workers
+    workers.forEach(worker => worker.terminate());
   }
 };
 
@@ -625,50 +675,122 @@ const resolvePersistentKey = async (token: string, viewerApi: ViewerApi): Promis
 
 export const collectElementsForIds = async (
   viewerApi: ViewerApi,
-  options?: CollectElementsOptions
+  options?: CollectElementsOptions & { filterGlobalIds?: string[] } // Add optional filter
 ): Promise<ElementData[]> => {
-  if (!viewerApi) return [];
-  const globalIds = await viewerApi.listGlobalIds();
+  console.log('🔍 [collectElementsForIds] START', { 
+    hasFilterGlobalIds: !!options?.filterGlobalIds, 
+    filterCount: options?.filterGlobalIds?.length 
+  });
+  
+  if (!viewerApi) {
+    console.log('🔍 [collectElementsForIds] No viewerApi');
+    return [];
+  }
+  
+  // OPTIMIZATION: If we have filterGlobalIds, use them directly - no need to get all IDs!
+  let globalIds: string[];
+  if (options?.filterGlobalIds && options.filterGlobalIds.length > 0) {
+    console.log('🔍 [collectElementsForIds] Using provided filterGlobalIds directly (skipping listGlobalIds)');
+    globalIds = options.filterGlobalIds;
+  } else {
+    // Get all global IDs first (only when validating entire model)
+    console.log('🔍 [collectElementsForIds] Calling listGlobalIds...');
+    const allGlobalIds = await viewerApi.listGlobalIds();
+    console.log('🔍 [collectElementsForIds] Got all GlobalIds:', allGlobalIds.length);
+    globalIds = allGlobalIds;
+  }
+  
+  console.log('🔍 [collectElementsForIds] GlobalIds to validate:', globalIds.length);
+  
   if (!globalIds.length) {
+    console.log('🔍 [collectElementsForIds] No GlobalIds to process');
     cachedElements = null;
     return [];
   }
+  
+  console.log('🔍 [collectElementsForIds] Building cache token...');
   const token = buildCacheToken(globalIds);
+  console.log('🔍 [collectElementsForIds] Token built:', token.substring(0, 20) + '...');
+  
   const expectedTotal = Math.max(globalIds.length, 1);
   options?.onPhase?.('BUILDING_PROPERTIES');
   options?.onProgress?.({ done: 0, total: expectedTotal });
+  
+  // Check if we have cached data for this exact set of elements
+  console.log('🔍 [collectElementsForIds] Checking memory cache...');
   if (cachedElements && cachedElements.token === token) {
+    console.log('🔍 [collectElementsForIds] Memory cache HIT! Returning', cachedElements.elements.length, 'elements');
     return cachedElements.elements;
   }
-  const persistentKey = await resolvePersistentKey(token, viewerApi);
-  if (persistentKey) {
-    try {
-      const stored = await idsDb.get(persistentKey);
-      if (stored && stored.length) {
-        options?.onProgress?.({ done: stored.length, total: expectedTotal });
-        cachedElements = { token, elements: stored };
-        return stored;
+  console.log('🔍 [collectElementsForIds] Memory cache MISS');
+  
+  // Skip persistent cache for filtered queries (small element sets don't benefit from caching)
+  const isFiltering = options?.filterGlobalIds && options.filterGlobalIds.length > 0;
+  let persistentKey: string | null = null;
+  
+  if (!isFiltering) {
+    console.log('🔍 [collectElementsForIds] Resolving persistent key...');
+    persistentKey = await resolvePersistentKey(token, viewerApi);
+    console.log('🔍 [collectElementsForIds] Persistent key:', persistentKey);
+    
+    if (persistentKey) {
+      console.log('🔍 [collectElementsForIds] Checking IndexedDB cache...');
+      try {
+        const stored = await idsDb.get(persistentKey);
+        console.log('🔍 [collectElementsForIds] IndexedDB returned:', stored?.length || 0, 'elements');
+        if (stored && stored.length) {
+          const metadata = await idsDb.getMetadata(persistentKey);
+          const cacheAge = metadata ? Math.round((Date.now() - metadata.timestamp) / 1000 / 60) : 0;
+          console.log(`⚡ Using cached elements from IndexedDB: ${stored.length} elements (cached ${cacheAge} minutes ago)`);
+          options?.onProgress?.({ done: stored.length, total: expectedTotal });
+          cachedElements = { token, elements: stored };
+          return stored;
+        }
+        console.log('🔍 [collectElementsForIds] IndexedDB cache MISS or empty');
+      } catch (error) {
+        console.warn('IDS adapter: failed to read cached elements from IndexedDB', error);
       }
-    } catch (error) {
-      console.warn('IDS adapter: failed to read cached elements from IndexedDB', error);
     }
+  } else {
+    console.log('🔍 [collectElementsForIds] Skipping persistent cache (filtering mode)');
   }
 
   let elements: ElementData[] = [];
-  const total = typeof viewerApi.countElements === 'function' ? await viewerApi.countElements().catch(() => globalIds.length) : globalIds.length;
-
-  if (typeof viewerApi.iterElements === 'function') {
-    try {
-      elements = await buildWithWorker(viewerApi, total ?? globalIds.length, options);
-      if (!elements.length) {
-        elements = await collectElementsDirect(viewerApi, globalIds, options);
-      }
-    } catch (error) {
-      console.warn('IDS adapter: property build worker failed, falling back to direct collection', error);
-  elements = await collectElementsDirect(viewerApi, globalIds, options);
-    }
-  } else {
+  
+  console.log('🔍 [collectElementsForIds] Decision point:', { 
+    isFiltering, 
+    willUseDirect: isFiltering,
+    globalIdsCount: globalIds.length 
+  });
+  
+  if (isFiltering) {
+    console.log(`📌 Filtering mode: collecting ${globalIds.length} specific elements directly`);
+    console.log('🔍 [collectElementsForIds] Calling collectElementsDirect...');
     elements = await collectElementsDirect(viewerApi, globalIds, options);
+    console.log('🔍 [collectElementsForIds] collectElementsDirect returned:', elements.length, 'elements');
+  } else {
+    console.log('🔍 [collectElementsForIds] Full model mode - using workers');
+    // For full model validation, use parallel workers
+    const total = typeof viewerApi.countElements === 'function' ? await viewerApi.countElements().catch(() => globalIds.length) : globalIds.length;
+    console.log('🔍 [collectElementsForIds] Total elements:', total);
+
+    if (typeof viewerApi.iterElements === 'function') {
+      try {
+        console.log('🔍 [collectElementsForIds] Calling buildWithWorker...');
+        elements = await buildWithWorker(viewerApi, total ?? globalIds.length, options);
+        console.log('🔍 [collectElementsForIds] buildWithWorker returned:', elements.length, 'elements');
+        if (!elements.length) {
+          console.log('🔍 [collectElementsForIds] No elements from worker, falling back to direct');
+          elements = await collectElementsDirect(viewerApi, globalIds, options);
+        }
+      } catch (error) {
+        console.warn('IDS adapter: property build worker failed, falling back to direct collection', error);
+    elements = await collectElementsDirect(viewerApi, globalIds, options);
+      }
+    } else {
+      console.log('🔍 [collectElementsForIds] iterElements not available, using direct');
+      elements = await collectElementsDirect(viewerApi, globalIds, options);
+    }
   }
 
   if (persistentKey && elements.length) {

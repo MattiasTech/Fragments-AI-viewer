@@ -27,6 +27,7 @@ interface IdsStoreState {
   filterDescription: string | null;
   error: string | null;
   lastRunAt: number | null;
+  validateSelectedOnly: boolean; // New: toggle for selected elements only
 }
 
 const initialState: IdsStoreState = {
@@ -41,6 +42,7 @@ const initialState: IdsStoreState = {
   filterDescription: null,
   error: null,
   lastRunAt: null,
+  validateSelectedOnly: false, // Default to validating all elements
 };
 
 let state = initialState;
@@ -171,6 +173,12 @@ const storeApi = {
   clearResults: () => {
     resetResults();
   },
+  setValidateSelectedOnly: (value: boolean) => {
+    setState((prev) => ({
+      ...prev,
+      validateSelectedOnly: value,
+    }));
+  },
   filterRows: (predicate: IdsFilterPredicate | null, description?: string) => {
     setState((prev) => {
       if (!predicate) {
@@ -218,6 +226,33 @@ const storeApi = {
       return;
     }
 
+    // Check if validating selected elements only
+    let filterGlobalIds: string[] | undefined;
+    if (state.validateSelectedOnly) {
+      console.log('🎯 Selected Only mode is active');
+      if (viewerApi.getSelectedGlobalIds) {
+        console.log('🎯 Getting selected GlobalIds...');
+        filterGlobalIds = await viewerApi.getSelectedGlobalIds();
+        console.log('🎯 Selected GlobalIds:', filterGlobalIds);
+        if (!filterGlobalIds || filterGlobalIds.length === 0) {
+          console.error('❌ No elements selected');
+          setState((prev) => ({
+            ...prev,
+            error: 'No elements selected. Please select elements or switch to "All Elements" mode.',
+          }));
+          return;
+        }
+        console.log(`🎯 Validating ${filterGlobalIds.length} selected elements`);
+      } else {
+        console.warn('⚠️ getSelectedGlobalIds not available on viewerApi');
+        setState((prev) => ({
+          ...prev,
+          error: 'Selected elements validation is not supported by this viewer.',
+        }));
+        return;
+      }
+    }
+
     setState((prev) => ({
       ...prev,
       isChecking: true,
@@ -228,6 +263,7 @@ const storeApi = {
 
     try {
       const elements = await collectElementsForIds(viewerApi, {
+        filterGlobalIds, // Pass the filter if validating selected only
         onPhase: (phase) => {
           setState((prev) => ({
             ...prev,
@@ -282,6 +318,17 @@ const storeApi = {
 
       const rules = result.rules ?? [];
       const rows = result.rows ?? [];
+
+      // Add validated elements to cache for future use (e.g., highlighting)
+      if (filterGlobalIds && filterGlobalIds.length > 0 && typeof viewerApi.addToCache === 'function') {
+        console.log(`📦 Adding ${filterGlobalIds.length} validated elements to cache...`);
+        try {
+          await viewerApi.addToCache(filterGlobalIds);
+          console.log('📦 Successfully updated cache with validated elements');
+        } catch (error) {
+          console.warn('📦 Failed to add elements to cache:', error);
+        }
+      }
 
       setState((prev) => ({
         ...prev,
@@ -347,7 +394,8 @@ export const useIdsActions = () => {
   const clearResults = useCallback(storeApi.clearResults, []);
   const filterRows = useCallback(storeApi.filterRows, []);
   const runCheck = useCallback(storeApi.runCheck, []);
-  return { setIdsXmlText, appendDocuments, clearResults, filterRows, runCheck, invalidateCaches: storeApi.invalidateCaches };
+  const setValidateSelectedOnly = useCallback(storeApi.setValidateSelectedOnly, []);
+  return { setIdsXmlText, appendDocuments, clearResults, filterRows, runCheck, setValidateSelectedOnly, invalidateCaches: storeApi.invalidateCaches };
 };
 
 export const idsStore = storeApi;

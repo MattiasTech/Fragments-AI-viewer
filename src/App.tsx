@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from 'react';
 import * as OBC from '@thatopen/components';
 import * as OBCF from '@thatopen/components-front';
-import * as FRAGS from '@thatopen/fragments';
+import type * as FRAGS from '@thatopen/fragments';
 import * as BUI from '@thatopen/ui';
 import * as BUIC from '@thatopen/ui-obc';
 import AppBar from '@mui/material/AppBar';
@@ -53,9 +53,10 @@ import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
 import ViewInArIcon from '@mui/icons-material/ViewInAr';
 import * as THREE from 'three';
 import Stats from 'stats.js';
-import ChatWindow, { SelectionCommand } from './ChatWindow';
-import IdsPanel from './ids/IdsPanel';
-import IdsCreatorPanel from './ids/IdsCreatorPanel';
+import type { SelectionCommand } from './ChatWindow';
+const ChatWindow = React.lazy(() => import('./ChatWindow'));
+const IdsPanel = React.lazy(() => import('./ids/IdsPanel'));
+const IdsCreatorPanel = React.lazy(() => import('./ids/IdsCreatorPanel'));
 import { idsStore } from './ids/ids.store';
 import type { ElementData, ViewerApi } from './ids/ids.types';
 
@@ -684,24 +685,66 @@ const collectIfcPropertySetRows = (root: any): PropertyRow[] => {
       return;
     }
 
+    // Process property set containers first
+    let hasProcessedContainers = false;
     for (const key of PROPERTY_SET_CONTAINER_KEYS) {
       if (Object.prototype.hasOwnProperty.call(value, key)) {
         processDeclarativeContainer((value as Record<string, any>)[key]);
+        hasProcessedContainers = true;
       }
     }
 
+    // If this object itself is a property set, emit its rows
     if (isIfcPropertySet(value)) {
       const meta = makePropertySetMeta(value);
       emitPropertySetRows(meta, value);
     }
 
-    Object.values(value as Record<string, any>).forEach((child) => {
-      if (child && typeof child === 'object') traverse(child);
-    });
+    // Only traverse deeper if we haven't already processed property set containers
+    // and this isn't a property set itself (to avoid double processing)
+    if (!hasProcessedContainers && !isIfcPropertySet(value)) {
+      Object.entries(value as Record<string, any>).forEach(([key, child]) => {
+        // Skip known container keys and metadata keys to prevent duplication
+        if (PROPERTY_SET_CONTAINER_KEYS.includes(key as any)) return;
+        if (PROPERTY_SET_METADATA_KEYS.has(key)) return;
+        if (IFC_PROPERTY_COLLECTION_KEYS.includes(key as any)) return;
+        if (child && typeof child === 'object') traverse(child);
+      });
+    }
   };
 
   traverse(root);
-  return rows;
+  
+  // Aggressive deduplication pass: remove duplicate rows based on multiple strategies
+  const seen = new Map<string, PropertyRow>();
+  const labelValueSeen = new Set<string>();
+  
+  for (const row of rows) {
+    // Strategy 1: Exact match on label + value
+    const labelValueKey = `${row.label}::${row.value}`;
+    if (labelValueSeen.has(labelValueKey)) {
+      continue; // Skip duplicate
+    }
+    
+    // Strategy 2: Match on full property path including pset and property names
+    const fullKey = `${row.rawPsetName || 'unknown'}::${row.rawPropertyName || 'unknown'}::${row.value}`;
+    if (seen.has(fullKey)) {
+      continue; // Skip duplicate
+    }
+    
+    // This is a unique property, keep it
+    labelValueSeen.add(labelValueKey);
+    seen.set(fullKey, row);
+  }
+  
+  const uniqueRows = Array.from(seen.values());
+  
+  // Debug logging (can be removed after verification)
+  if (rows.length !== uniqueRows.length) {
+  // deduplication completed
+  }
+  
+  return uniqueRows;
 };
 
 const FRAGMENTS_ITEM_DATA_OPTIONS: Record<string, any> = {
@@ -770,6 +813,10 @@ const readName = (value: any): string | undefined => {
 
 const buildPropertyData = (item: Record<string, any> | null | undefined): { rows: PropertyRow[]; tree: PropertyNode[] } => {
   if (!item || typeof item !== 'object') return { rows: [], tree: [] };
+
+  // Debug: Log input structure
+  const inputKeys = Object.keys(item);
+  // processed property data keys
 
   const rows: PropertyRow[] = [];
   const visited = new WeakSet<object>();
@@ -851,6 +898,16 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
       for (const [entryKey, childVal] of Object.entries(value as Record<string, any>)) {
         if (childVal == null) continue;
         if (entryKey === 'Name' || entryKey === 'name') continue;
+        
+        // CRITICAL FIX: Skip property set containers - they're processed by collectIfcPropertySetRows
+        // This prevents duplicate extraction of properties
+        if (entryKey === 'IsDefinedBy' || entryKey === 'isDefinedBy' || 
+            entryKey === 'psets' || entryKey === 'Psets' || 
+            entryKey === 'propertySets' || entryKey === 'PropertySets' ||
+            entryKey === 'property_sets' || entryKey === 'Property_Sets') {
+          continue; // Skip these containers to avoid duplicates
+        }
+        
         if (entryKey === 'NominalValue' || entryKey === 'nominalValue') {
           const nominalLabel = prettifyLabel('Nominal Value') || 'Nominal Value';
           const childNode = visit(childVal, [...labelParts, nominalLabel], [...keyParts, 'nominal-value']);
@@ -899,6 +956,8 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
 
   const propertySetRows = collectIfcPropertySetRows(item);
   if (propertySetRows.length) {
+  // collected property set rows
+    
     const dedupedPropertySetRows: PropertyRow[] = [];
     const propertySetPathSet = new Set<string>();
 
@@ -918,6 +977,7 @@ const buildPropertyData = (item: Record<string, any> | null | undefined): { rows
     }
 
     rows.splice(0, rows.length, ...dedupedPropertySetRows, ...remainingRows);
+  // dedup results summarized
   }
 
   return { rows, tree };
@@ -1006,7 +1066,7 @@ const App: React.FC = () => {
         };
         try {
           const json = JSON.stringify(payload, null, 2);
-          console.log('Raw model dump (first 2000 chars):', json.slice(0, 2000));
+          // raw dump prepared
           const blob = new Blob([json], { type: 'application/json' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -1113,8 +1173,7 @@ const App: React.FC = () => {
           await new Promise((r) => setTimeout(r, 0));
         }
 
-        console.log('inspectModelProperties keyCounts (top 20):', Object.entries(keyCounts).sort((a, b) => b[1] - a[1]).slice(0, 20));
-        console.log('inspectModelProperties stats:', stats);
+  // inspectModelProperties stats available in variable 'stats'
         console.log('inspectModelProperties examples (up to 6):', examples);
         const foundAnyPset = Object.keys(stats).some((k) => /pset|HasProperties|PropertySet|IfcPropertySingleValue/i.test(k));
         if (!foundAnyPset) {
@@ -1771,15 +1830,44 @@ const App: React.FC = () => {
 
   const groupLocalIdsByModel = useCallback(
     async (globalIds: string[]) => {
-      const cache = await ensureIdsCache();
       const grouped = new Map<string, number[]>();
+      
+      console.log(`🔍 [groupLocalIdsByModel] Grouping ${globalIds.length} GlobalIds...`);
+      
+      // Use cache (which should now contain validated elements)
+      const cache = idsCacheRef.current;
+      
+      if (!cache || cache.records.size === 0) {
+        console.warn(`🔍 [groupLocalIdsByModel] Cache is empty, building full cache...`);
+        const fullCache = await ensureIdsCache();
+        globalIds.forEach((id) => {
+          const record = fullCache.records.get(id);
+          if (!record) {
+            console.warn(`🔍 [groupLocalIdsByModel] GlobalId not found in cache: ${id}`);
+            return;
+          }
+          const existing = grouped.get(record.modelId);
+          if (existing) existing.push(record.localId);
+          else grouped.set(record.modelId, [record.localId]);
+        });
+        console.log(`🔍 [groupLocalIdsByModel] Grouped ${globalIds.length} GlobalIds into ${grouped.size} models`);
+        return { grouped, cache: fullCache };
+      }
+      
+      // Use existing cache
+      console.log(`🔍 [groupLocalIdsByModel] Using existing cache with ${cache.records.size} elements`);
       globalIds.forEach((id) => {
         const record = cache.records.get(id);
-        if (!record) return;
+        if (!record) {
+          console.warn(`🔍 [groupLocalIdsByModel] GlobalId not found in cache: ${id}`);
+          return;
+        }
         const existing = grouped.get(record.modelId);
         if (existing) existing.push(record.localId);
         else grouped.set(record.modelId, [record.localId]);
       });
+      
+      console.log(`🔍 [groupLocalIdsByModel] Grouped ${globalIds.length} GlobalIds into ${grouped.size} models`);
       return { grouped, cache };
     },
     [ensureIdsCache]
@@ -1790,7 +1878,68 @@ const App: React.FC = () => {
       const cache = await ensureIdsCache();
       return cache.elements.map((element) => element.GlobalId);
     },
+    getSelectedGlobalIds: async () => {
+      // Get currently selected element global IDs directly from fragments
+      console.log('📍 getSelectedGlobalIds called, selectedRef.current:', selectedRef.current);
+      const selection = selectedRef.current; // Use the ref to get latest selection
+      
+      if (!selection || selection.length === 0) {
+        console.log('📍 No selection found');
+        return []; // No selection
+      }
+      
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.warn('📍 Fragments not available');
+        return [];
+      }
+      
+      console.log('📍 Processing selection:', selection);
+      // Fetch GlobalId directly from each selected element
+      const selectedGlobalIds: string[] = [];
+      for (const item of selection) {
+        const model = fragments.list.get(item.modelId);
+        if (!model) {
+          console.warn('📍 Model not found for item:', item);
+          continue;
+        }
+        
+        try {
+          // Fetch just the GlobalId from the element data
+          const [data] = await model.getItemsData([item.localId], { attributesDefault: false });
+          if (data) {
+            const globalId = findFirstValueByKeywords(data, ['globalid', 'global id', 'guid']);
+            if (globalId && typeof globalId === 'string') {
+              selectedGlobalIds.push(globalId);
+              console.log('📍 Found GlobalId for item:', item, '→', globalId);
+            } else {
+              console.warn('📍 No GlobalId found in data for item:', item);
+            }
+          }
+        } catch (error) {
+          console.error('📍 Error fetching data for item:', item, error);
+        }
+      }
+      
+      console.log('📍 Final selectedGlobalIds:', selectedGlobalIds);
+      return selectedGlobalIds;
+    },
     getElementProps: async (globalId: string) => {
+      // Try to get from cache first if it exists (fast path)
+      const existingCache = idsCacheRef.current;
+      if (existingCache) {
+        const record = existingCache.records.get(globalId);
+        if (record) {
+          return {
+            ifcClass: record.element.ifcClass,
+            psets: record.psets,
+            attributes: record.attributes,
+          };
+        }
+      }
+      
+      // If not in cache, we need to build the cache
+      // This is slow but necessary for the current architecture
       const cache = await ensureIdsCache();
       const record = cache.records.get(globalId);
       if (!record) {
@@ -1801,6 +1950,102 @@ const App: React.FC = () => {
         psets: record.psets,
         attributes: record.attributes,
       };
+    },
+    getElementPropsFast: async (globalId: string) => {
+      console.log('🔍 [getElementPropsFast] START for', globalId);
+      // Fast path: get properties directly from selectedRef without building full cache
+      const selection = selectedRef.current;
+      const fragments = fragmentsRef.current;
+      
+      console.log('🔍 [getElementPropsFast] Selection:', selection);
+      console.log('🔍 [getElementPropsFast] Fragments available:', !!fragments);
+      
+      if (!fragments) {
+        console.error('🔍 [getElementPropsFast] Fragments not available!');
+        throw new Error('Fragments not available');
+      }
+      
+      // Find the element in current selection first (most likely case for filtered validation)
+      console.log('🔍 [getElementPropsFast] Searching in', selection.length, 'selected items');
+      for (let i = 0; i < selection.length; i++) {
+        const item = selection[i];
+        console.log(`🔍 [getElementPropsFast] Checking item ${i + 1}/${selection.length}:`, item);
+        const model = fragments.list.get(item.modelId);
+        if (!model) {
+          console.log(`🔍 [getElementPropsFast] Model not found for ${item.modelId}`);
+          continue;
+        }
+        
+        try {
+          console.log(`🔍 [getElementPropsFast] Calling getItemsData for localId ${item.localId}...`);
+          const [data] = await model.getItemsData([item.localId], FRAGMENTS_ITEM_DATA_OPTIONS);
+          console.log('🔍 [getElementPropsFast] Got data:', !!data);
+          
+          if (data) {
+            console.log('🔍 [getElementPropsFast] Data keys:', Object.keys(data));
+            console.log('🔍 [getElementPropsFast] data._category:', data._category);
+            console.log('🔍 [getElementPropsFast] data.ifcClass:', data.ifcClass);
+            console.log('🔍 [getElementPropsFast] data.type:', data.type);
+            console.log('🔍 [getElementPropsFast] data.constructor.name:', data.constructor?.name);
+            
+            const elementGlobalId = findFirstValueByKeywords(data, ['globalid', 'global id', 'guid']);
+            console.log(`🔍 [getElementPropsFast] Element GlobalId: ${elementGlobalId}, looking for: ${globalId}`);
+            
+            if (elementGlobalId === globalId) {
+              console.log('🔍 [getElementPropsFast] MATCH! Extracting properties...');
+              // Found it! Extract properties directly using the same logic as cache building
+              const ifcClass = extractIfcClassFromData(data);
+              console.log('🔍 [getElementPropsFast] ifcClass extracted:', ifcClass);
+              
+              const psets: Record<string, Record<string, unknown>> = {};
+              const attributes: Record<string, unknown> = {};
+              
+              console.log('🔍 [getElementPropsFast] Calling collectIfcPropertySetRows...');
+              // Extract property sets
+              const propertyRows = collectIfcPropertySetRows(data);
+              console.log('🔍 [getElementPropsFast] Got', propertyRows.length, 'property rows');
+              
+              propertyRows.forEach((row) => {
+                const labelParts = row.label.split('/').map((part) => part.trim());
+                const rawPset = row.rawPsetName ?? labelParts[1] ?? '';
+                const rawProperty = row.rawPropertyName ?? labelParts[labelParts.length - 1] ?? '';
+                const normalizedPset = normalizeIdsToken(rawPset);
+                const normalizedProperty = normalizeIdsToken(rawProperty);
+                if (!normalizedPset || !normalizedProperty) return;
+                if (!psets[normalizedPset]) {
+                  psets[normalizedPset] = {};
+                }
+                if (!(normalizedProperty in psets[normalizedPset])) {
+                  psets[normalizedPset][normalizedProperty] = row.value;
+                }
+              });
+              
+              console.log('🔍 [getElementPropsFast] Extracted', Object.keys(psets).length, 'psets');
+              
+              // Extract basic attributes
+              attributes.ifcClass = ifcClass;
+              attributes.GlobalId = globalId;
+              const name = readName(data);
+              if (name) attributes.Name = name;
+              const category = findFirstValueByKeywords(data, ['category', 'ifccategory']);
+              if (category) attributes.Category = category;
+              const typeValue = findFirstValueByKeywords(data, ['type', 'typename']);
+              if (typeValue) attributes.Type = typeValue;
+              
+              console.log(`📌 Fast props for ${globalId}:`, { ifcClass, psetCount: Object.keys(psets).length });
+              console.log('🔍 [getElementPropsFast] SUCCESS - returning properties');
+              return { ifcClass, psets, attributes };
+            }
+          }
+        } catch (error) {
+          console.error(`🔍 [getElementPropsFast] Error for item:`, item, error);
+        }
+      }
+      
+      // Fallback to regular method if not found in selection
+      console.log(`📌 ${globalId} not in selection, falling back to cache`);
+      console.log('🔍 [getElementPropsFast] FALLBACK to getElementProps');
+      return viewerApiRef.current!.getElementProps(globalId);
     },
     countElements: async () => {
       const cache = await ensureIdsCache();
@@ -1828,6 +2073,136 @@ const App: React.FC = () => {
         },
       };
     },
+    addToCache: async (globalIds: string[]) => {
+      // Add elements to the cache incrementally
+      console.log(`📦 [addToCache] Adding ${globalIds.length} elements to cache`);
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.warn('📦 [addToCache] Fragments not available');
+        return;
+      }
+      
+      // Get or initialize cache
+      let cache = idsCacheRef.current;
+      if (!cache) {
+        const signature = computeIdsSignature();
+        cache = {
+          signature,
+          records: new Map(),
+          elements: [],
+          modelLocalIds: new Map()
+        };
+        idsCacheRef.current = cache;
+      }
+      
+      // Add each element to cache
+      const selection = selectedRef.current;
+      console.log(`📦 [addToCache] Selection has ${selection.length} items`);
+      
+      for (const globalId of globalIds) {
+        // Skip if already in cache
+        if (cache.records.has(globalId)) {
+          console.log(`📦 [addToCache] ${globalId} already in cache, skipping`);
+          continue;
+        }
+        
+        console.log(`📦 [addToCache] Searching for ${globalId} in ${selection.length} selected items...`);
+        
+        // Find the element in selection
+        let found = false;
+        for (const item of selection) {
+          console.log(`📦 [addToCache] Checking item: modelId=${item.modelId}, localId=${item.localId}`);
+          const model = fragments.list.get(item.modelId);
+          if (!model) {
+            console.log(`📦 [addToCache] Model not found: ${item.modelId}`);
+            continue;
+          }
+          
+          try {
+            const [data] = await model.getItemsData([item.localId], FRAGMENTS_ITEM_DATA_OPTIONS);
+            if (data) {
+              // Extract GlobalId - it might be wrapped in an object with 'value' property
+              let itemGlobalId = (data as any)._guid || (data as any).GlobalId;
+              if (itemGlobalId && typeof itemGlobalId === 'object') {
+                itemGlobalId = itemGlobalId.value || itemGlobalId;
+              }
+              console.log(`📦 [addToCache] Item GlobalId: ${itemGlobalId}, looking for: ${globalId}, match: ${itemGlobalId === globalId}`);
+              if (itemGlobalId === globalId) {
+                // Extract properties using same approach as getElementPropsFast
+                const ifcClass = extractIfcClassFromData(data);
+                
+                // Extract psets
+                const psets: Record<string, Record<string, unknown>> = {};
+                const propertyRows = collectIfcPropertySetRows(data);
+                propertyRows.forEach((row) => {
+                  const labelParts = row.label.split('/').map((part) => part.trim());
+                  const rawPset = row.rawPsetName ?? labelParts[1] ?? '';
+                  const rawProperty = row.rawPropertyName ?? labelParts[labelParts.length - 1] ?? '';
+                  const normalizedPset = normalizeIdsToken(rawPset);
+                  const normalizedProperty = normalizeIdsToken(rawProperty);
+                  if (!normalizedPset || !normalizedProperty) return;
+                  if (!psets[normalizedPset]) {
+                    psets[normalizedPset] = {};
+                  }
+                  if (!(normalizedProperty in psets[normalizedPset])) {
+                    psets[normalizedPset][normalizedProperty] = row.value;
+                  }
+                });
+                
+                // Extract attributes
+                const attributes: Record<string, unknown> = {
+                  ifcClass,
+                  GlobalId: globalId
+                };
+                const name = readName(data);
+                if (name) attributes.Name = name;
+                const category = findFirstValueByKeywords(data, ['category', 'ifccategory']);
+                if (category) attributes.Category = category;
+                const typeValue = findFirstValueByKeywords(data, ['type', 'typename']);
+                if (typeValue) attributes.Type = typeValue;
+                
+                // Create element record
+                const element: ElementData = {
+                  GlobalId: globalId,
+                  ifcClass,
+                  properties: flattenPropertiesForIds(data, globalId, ifcClass)
+                };
+                
+                const record: IdsElementRecord = {
+                  element,
+                  modelId: item.modelId,
+                  localId: item.localId,
+                  psets,
+                  attributes,
+                  raw: data as Record<string, unknown>
+                };
+                
+                // Add to cache
+                cache.records.set(globalId, record);
+                cache.elements.push(element);
+                
+                // Update modelLocalIds
+                const localIds = cache.modelLocalIds.get(item.modelId) || [];
+                localIds.push(item.localId);
+                cache.modelLocalIds.set(item.modelId, localIds);
+                
+                console.log(`📦 [addToCache] Added ${globalId} to cache (model: ${item.modelId}, localId: ${item.localId})`);
+                found = true;
+                break;
+              }
+            }
+          } catch (error) {
+            console.debug(`📦 [addToCache] Error checking selection item:`, error);
+          }
+        }
+        
+        if (!found) {
+          console.warn(`📦 [addToCache] Could not find ${globalId} in selection`);
+        }
+      }
+      
+      console.log(`📦 [addToCache] Cache now has ${cache.records.size} elements`);
+    },
     color: async (globalIds, rgba) => {
       if (!globalIds.length) return;
       const highlighter = highlighterRef.current;
@@ -1835,9 +2210,25 @@ const App: React.FC = () => {
       const world = worldRef.current;
       if (!highlighter || !fragmentsReadyRef.current || !fragments || !world) return;
       
-      const { grouped } = await groupLocalIdsByModel(globalIds);
+      console.log(`🎨 [color] Called with ${globalIds.length} GlobalIds, rgba:`, rgba);
+      
+      let grouped: Map<string, number[]>;
+      let cache;
+      try {
+        console.log(`🎨 [color] Calling groupLocalIdsByModel...`);
+        const result = await groupLocalIdsByModel(globalIds);
+        grouped = result.grouped;
+        cache = result.cache;
+        console.log(`🎨 [color] groupLocalIdsByModel returned ${grouped.size} models`);
+      } catch (error) {
+        console.error(`🎨 [color] groupLocalIdsByModel failed:`, error);
+        return;
+      }
+      
       const color = new THREE.Color(rgba.r, rgba.g, rgba.b);
       const colorHex = color.getHex();
+      
+      console.log(`🎨 [color] Grouped into ${grouped.size} models, colorHex: ${colorHex.toString(16)}`);
       
       // Store original colors so we can restore them later
       if (!idsOriginalColorsRef.current) {
@@ -1848,15 +2239,40 @@ const App: React.FC = () => {
         const model = fragments.list.get(modelId);
         if (!model || !localIds.length) continue;
         
+        console.log(`🎨 [color] Processing model ${modelId} with ${localIds.length} localIds`);
+        
         try {
           const ids = Array.from(localIds);
           
-          // Use the exact same pattern as the working AI selection code
-          // Try highlightById first (lowercase 'd')
+          // Try the deprecated add method first (most reliable)
+          if (typeof highlighter.add === 'function') {
+            try {
+              console.log(`🎨 [color] Trying highlighter.add with colorHex: ${colorHex.toString(16)}`);
+              highlighter.add(model, ids, colorHex);
+              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using add method`);
+              
+              // Force a render update
+              if (world && typeof world.update === 'function') {
+                try {
+                  world.update();
+                  console.log('🎨 [color] Forced world update');
+                } catch (updateError) {
+                  console.debug('World update failed:', updateError);
+                }
+              }
+              
+              continue;
+            } catch (e) {
+              console.debug('add failed:', e);
+            }
+          }
+          
+          // Try highlightById (lowercase 'd')
           if (typeof highlighter.highlightById === 'function') {
             try {
+              console.log(`🎨 [color] Trying highlightById...`);
               await highlighter.highlightById(model, ids, colorHex);
-              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using highlightById`);
+              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using highlightById`);
               continue;
             } catch (e) {
               console.debug('highlightById failed:', e);
@@ -1866,8 +2282,9 @@ const App: React.FC = () => {
           // Try highlightByID (uppercase 'ID')
           if (typeof highlighter.highlightByID === 'function') {
             try {
+              console.log(`🎨 [color] Trying highlightByID...`);
               await highlighter.highlightByID(model, ids, colorHex);
-              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using highlightByID`);
+              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using highlightByID`);
               continue;
             } catch (e) {
               console.debug('highlightByID failed:', e);
@@ -1877,6 +2294,12 @@ const App: React.FC = () => {
           // Try the new styles.set() API (replaces deprecated add method)
           if (highlighter.styles && typeof highlighter.styles.set === 'function') {
             try {
+              // Skip if no IDs to highlight
+              if (!ids || ids.length === 0) {
+                console.debug(`Skipping highlight for model ${modelId} - no IDs`);
+                continue;
+              }
+              
               // Create a style name for this color
               const styleName = `ids-color-${colorHex.toString(16).padStart(6, '0')}`;
               
@@ -1886,30 +2309,36 @@ const App: React.FC = () => {
                 fillOpacity: 1
               });
               
-              // Apply the style to the model and IDs
-              if (typeof highlighter.select === 'function') {
-                highlighter.select(model, ids, styleName);
+              // Create the selection first if it doesn't exist
+              if (typeof highlighter.create === 'function') {
+                try {
+                  // Create a selection for this style if it doesn't exist
+                  if (!highlighter.list || !highlighter.list.has(styleName)) {
+                    highlighter.create(styleName);
+                  }
+                } catch (createError) {
+                  console.debug('highlighter.create failed:', createError);
+                }
               }
               
-              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using styles.set`);
+              // Apply the style to the model and IDs
+              if (typeof highlighter.select === 'function') {
+                try {
+                  highlighter.select(model, ids, styleName);
+                } catch (selectError) {
+                  console.debug('highlighter.select failed:', selectError);
+                  throw selectError; // Re-throw to try next method
+                }
+              }
+              
+              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using styles.set`);
               continue;
             } catch (e) {
               console.debug('styles.set failed:', e);
             }
           }
           
-          // Fallback: deprecated add method (still works but shows warning)
-          if (typeof highlighter.add === 'function') {
-            try {
-              highlighter.add(model, ids, colorHex);
-              console.log(`Successfully colored ${ids.length} elements in model ${modelId} using deprecated add method`);
-              continue;
-            } catch (e) {
-              console.debug('add failed:', e);
-            }
-          }
-          
-          console.warn(`Could not color model ${modelId} - all highlighter methods failed`);
+          console.warn(`❌ Could not color model ${modelId} - all highlighter methods failed`);
         } catch (error) {
           console.error(`Failed to color model ${modelId}:`, error);
           // Continue with other models even if one fails
@@ -1960,27 +2389,49 @@ const App: React.FC = () => {
     },
     isolate: async (globalIds) => {
       const hider = hiderRef.current;
-      if (!hider || !fragmentsReadyRef.current) return;
+      const fragments = fragmentsRef.current;
+      if (!hider || !fragments || !fragmentsReadyRef.current) return;
+      
       await Promise.resolve(hider.set(true));
+      
       if (!globalIds.length || !fragmentsReadyRef.current) return;
-      const cache = await ensureIdsCache();
+      
+      const { grouped } = await groupLocalIdsByModel(globalIds);
+      
+      if (grouped.size === 0) {
+        console.warn('isolate: No elements found in cache for isolation');
+        return;
+      }
+      
       const keepMap = new Map<string, Set<number>>();
-      globalIds.forEach((id) => {
-        const record = cache.records.get(id);
-        if (!record) return;
-        const set = keepMap.get(record.modelId);
-        if (set) set.add(record.localId);
-        else keepMap.set(record.modelId, new Set([record.localId]));
+      grouped.forEach((localIds, modelId) => {
+        keepMap.set(modelId, new Set(localIds));
       });
+      
       const hideMap: Record<string, Set<number>> = {};
-      cache.modelLocalIds.forEach((localIds, modelId) => {
-        const keep = keepMap.get(modelId) ?? new Set<number>();
-        const toHide = localIds.filter((localId) => !keep.has(localId));
-        if (toHide.length) {
-          hideMap[modelId] = new Set(toHide);
+      for (const [modelId, keepSet] of keepMap.entries()) {
+        const model = fragments.list.get(modelId);
+        if (!model) continue;
+        
+        try {
+          let allLocalIds: number[] = [];
+          const fetched = await model.getLocalIds();
+          if (Array.isArray(fetched)) {
+            allLocalIds = fetched;
+          } else if (fetched && typeof (fetched as any)[Symbol.iterator] === 'function') {
+            allLocalIds = Array.from(fetched as Iterable<number>);
+          }
+          
+          const toHide = allLocalIds.filter((localId) => !keepSet.has(localId));
+          if (toHide.length > 0) {
+            hideMap[modelId] = new Set(toHide);
+          }
+        } catch (error) {
+          console.error('isolate: Failed to get local IDs for model', modelId, error);
         }
-      });
-      if (Object.keys(hideMap).length) {
+      }
+      
+      if (Object.keys(hideMap).length > 0) {
         await Promise.resolve(hider.set(false, hideMap));
       }
     },
@@ -1997,13 +2448,18 @@ const App: React.FC = () => {
       const camera = world.camera ?? null;
       const controls = camera?.controls ?? null;
       const threeCamera = camera?.three ?? null;
+      
       const { grouped } = await groupLocalIdsByModel(globalIds);
+      
       const boundingBox = new THREE.Box3();
       let hasBox = false;
-      for (const modelId of grouped.keys()) {
+      
+      for (const [modelId, localIds] of grouped.entries()) {
         const model = fragments.list.get(modelId);
         if (!model || !model.object) continue;
+        
         const modelBox = new THREE.Box3().setFromObject(model.object);
+        
         if (!modelBox.isEmpty()) {
           if (!hasBox) {
             boundingBox.copy(modelBox);
@@ -2013,13 +2469,17 @@ const App: React.FC = () => {
           }
         }
       }
+      
       if (!hasBox) return;
+      
       const center = new THREE.Vector3();
       const size = new THREE.Vector3();
       boundingBox.getCenter(center);
       boundingBox.getSize(size);
+      
       const maxDim = Math.max(size.x, size.y, size.z) || 10;
-      const dist = maxDim * 2.4;
+      const dist = maxDim * 1.5;
+      
       if (controls) {
         controls.setLookAt(center.x + dist, center.y + dist, center.z + dist, center.x, center.y, center.z, true);
       } else if (threeCamera) {
@@ -2214,6 +2674,16 @@ const App: React.FC = () => {
       const highlighter = components.get(OBCF.Highlighter);
       highlighter.setup({ world });
       highlighter.zoomToSelection = true;
+      
+      // Ensure default "select" style exists to prevent "Selection select does not exist" error
+      try {
+        if (typeof (highlighter as any).create === 'function') {
+          (highlighter as any).create('select');
+        }
+      } catch (error) {
+        // Ignore if select already exists
+      }
+      
       highlighterRef.current = highlighter;
 
       const hider = components.get(OBC.Hider);
@@ -2287,13 +2757,19 @@ const App: React.FC = () => {
 
   getWorldCamera()?.controls?.addEventListener('rest', () => fragments.core.update(true));
 
-      const ifcImporter = new FRAGS.IfcImporter();
-      const baseUrl = (import.meta as any).env?.BASE_URL ?? '/';
-      ifcImporter.wasm = {
-        path: `${baseUrl}web-ifc/`,
-        absolute: true,
-      };
-      ifcImporterRef.current = ifcImporter;
+      try {
+        const fragsModule = await import('@thatopen/fragments');
+        const IfcImporter = fragsModule.IfcImporter;
+        const ifcImporter = new IfcImporter();
+        const baseUrl = (import.meta as any).env?.BASE_URL ?? '/';
+        ifcImporter.wasm = {
+          path: `${baseUrl}web-ifc/`,
+          absolute: true,
+        };
+        ifcImporterRef.current = ifcImporter;
+      } catch (err) {
+        console.warn('Failed to lazy-load FRAGS.IfcImporter:', err);
+      }
 
       if (!disposed) {
         setComponentsReady(true);
@@ -4858,31 +5334,33 @@ const App: React.FC = () => {
         </DialogActions>
       </Dialog>
 
-        <IdsPanel
-          isOpen={isIdsOpen}
-          onOpen={openIdsPanel}
-          onClose={closeIdsPanel}
-          viewerApi={viewerApi}
-          hasModel={models.length > 0}
-          expandSignal={idsExpandSignal}
-        />
+        <Suspense fallback={null}>
+          <IdsPanel
+            isOpen={isIdsOpen}
+            onOpen={openIdsPanel}
+            onClose={closeIdsPanel}
+            viewerApi={viewerApi}
+            hasModel={models.length > 0}
+            expandSignal={idsExpandSignal}
+          />
 
-      <IdsCreatorPanel
-        isOpen={isIdsCreatorOpen}
-        onClose={() => setIsIdsCreatorOpen(false)}
-        viewerApi={viewerApi}
-        selectedItemData={properties}
-        onValidate={handleValidateFromCreator}
-      />
+          <IdsCreatorPanel
+            isOpen={isIdsCreatorOpen}
+            onClose={() => setIsIdsCreatorOpen(false)}
+            viewerApi={viewerApi}
+            selectedItemData={properties}
+            onValidate={handleValidateFromCreator}
+          />
 
-      <ChatWindow
-        getModelDataForAI={getModelDataForAI}
-        isOpen={isChatOpen}
-        onOpen={openChatWindow}
-        onClose={closeChatWindow}
-        expandSignal={chatExpandSignal}
-        onRequestSelection={handleAISelection}
-      />
+          <ChatWindow
+            getModelDataForAI={getModelDataForAI}
+            isOpen={isChatOpen}
+            onOpen={openChatWindow}
+            onClose={closeChatWindow}
+            expandSignal={chatExpandSignal}
+            onRequestSelection={handleAISelection}
+          />
+        </Suspense>
 
       <Menu
         open={Boolean(contextMenu)}
