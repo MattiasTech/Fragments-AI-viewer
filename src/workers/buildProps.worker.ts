@@ -12,6 +12,7 @@ type BuildRequest = {
   elements?: RawElement[];
   final?: boolean;
   reset?: boolean;
+  partIndex?: number;
 };
 
 type CancelRequest = { type: 'cancel' };
@@ -19,10 +20,11 @@ type CancelRequest = { type: 'cancel' };
 type WorkerInMessage = BuildRequest | CancelRequest;
 
 type ProgressMessage = { type: 'progress'; done: number; total: number };
-type DoneMessage = { type: 'done'; elements: ElementData[] };
+type BatchMessage = { type: 'batch'; elements: ElementData[]; partIndex?: number };
+type DoneMessage = { type: 'done' };
 type ErrorMessage = { type: 'error'; message: string };
 
-type WorkerOutMessage = ProgressMessage | DoneMessage | ErrorMessage;
+type WorkerOutMessage = ProgressMessage | BatchMessage | DoneMessage | ErrorMessage;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ctx: any = self as any;
@@ -661,18 +663,61 @@ const flattenPropertiesForIds = (data: unknown, globalId: string, ifcClass: stri
   return { flattened, psets, attributes };
 };
 
-let accumulated: ElementData[] = [];
 let seenIds = new Set<string>();
 let total = 0;
 let done = 0;
 let cancelled = false;
 
 const resetState = () => {
-  accumulated = [];
   seenIds = new Set<string>();
   total = 0;
   done = 0;
   cancelled = false;
+};
+
+// Fast property flattening - minimal processing for speed
+const flattenPropertiesFast = (rawData: unknown, globalId: string, ifcClass: string): Record<string, unknown> => {
+  const flattened: Record<string, unknown> = {
+    GlobalId: globalId,
+    ifcClass: ifcClass,
+    'Attributes.GlobalId': globalId,
+    'Attributes.IfcClass': ifcClass,
+  };
+  
+  if (!rawData || typeof rawData !== 'object') return flattened;
+  
+  const data = rawData as Record<string, unknown>;
+  
+  // Extract name quickly
+  const name = data.Name || data.name || data.NAME;
+  if (name && typeof name === 'string') {
+    flattened['Attributes.Name'] = name;
+  }
+  
+  // Quick attribute extraction - only top-level properties
+  for (const [key, value] of Object.entries(data)) {
+    if (value == null || key.startsWith('_')) continue;
+    
+    // Skip metadata keys
+    if (key === 'type' || key === 'Type' || key === 'expressID' || key === 'GlobalId') continue;
+    
+    // For simple types, add directly
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      flattened[`Attributes.${key}`] = value;
+      continue;
+    }
+    
+    // For objects, try to extract value quickly
+    if (typeof value === 'object' && !Array.isArray(value)) {
+      const obj = value as Record<string, unknown>;
+      const simpleValue = obj.value || obj.Value || obj.NominalValue || obj.nominalValue;
+      if (simpleValue != null && (typeof simpleValue === 'string' || typeof simpleValue === 'number')) {
+        flattened[`Attributes.${key}`] = simpleValue;
+      }
+    }
+  }
+  
+  return flattened;
 };
 
 const handleBuildRequest = (data: BuildRequest) => {
@@ -684,35 +729,58 @@ const handleBuildRequest = (data: BuildRequest) => {
   }
   if (cancelled) return;
   if (Array.isArray(data.elements) && data.elements.length) {
+    const batch: ElementData[] = [];
+    
+    // Process batch with minimal overhead
     for (const item of data.elements) {
       if (cancelled) break;
       const globalId = item.globalId?.trim();
       if (!globalId || seenIds.has(globalId)) continue;
       const rawData = item.data;
       if (!rawData || typeof rawData !== 'object') continue;
-      const ifcClass = item.ifcClass && item.ifcClass.trim().length ? item.ifcClass.trim() : extractIfcClassFromData(rawData);
-      const { flattened } = flattenPropertiesForIds(rawData, globalId, ifcClass);
+      
+      const ifcClass = item.ifcClass?.trim() || extractIfcClassFromData(rawData);
+      
+      // Use fast flattening instead of complex recursive version
+      const flattened = flattenPropertiesFast(rawData, globalId, ifcClass);
+      
       const element: ElementData = {
         GlobalId: globalId,
         ifcClass,
         properties: flattened,
       };
       seenIds.add(globalId);
-      accumulated.push(element);
+      batch.push(element);
     }
-    done = Math.min(accumulated.length, total || accumulated.length);
-    const progress: ProgressMessage = { type: 'progress', done, total: total || Math.max(accumulated.length, done) };
-    ctx.postMessage(progress satisfies WorkerOutMessage);
+    
+    if (batch.length) {
+      done += batch.length;
+      
+      // Send batch immediately
+      const batchMsg: BatchMessage = { 
+        type: 'batch', 
+        elements: batch, 
+        partIndex: (data as any).partIndex 
+      };
+      ctx.postMessage(batchMsg satisfies WorkerOutMessage);
+      
+      // Send progress less frequently to reduce overhead
+      if (done % 5000 < batch.length || data.final) {
+        const progress: ProgressMessage = { 
+          type: 'progress', 
+          done, 
+          total: total || Math.max(done, total) 
+        };
+        ctx.postMessage(progress satisfies WorkerOutMessage);
+      }
+    }
   }
   if (data.final) {
     if (cancelled) {
       const error: ErrorMessage = { type: 'error', message: 'Build cancelled' };
       ctx.postMessage(error satisfies WorkerOutMessage);
     } else {
-      const doneMessage: DoneMessage = {
-        type: 'done',
-        elements: accumulated,
-      };
+      const doneMessage: DoneMessage = { type: 'done' };
       ctx.postMessage(doneMessage satisfies WorkerOutMessage);
     }
     resetState();

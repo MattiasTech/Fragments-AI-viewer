@@ -803,3 +803,684 @@ export const collectElementsForIds = async (
   options?.onProgress?.({ done: Math.min(elements.length, expectedTotal), total: expectedTotal });
   return elements;
 };
+
+/**
+ * Build element data for the given global IDs and persist to IndexedDB under a computed key.
+ * Returns the built elements.
+ */
+export const buildAndPersistCache = async (
+  viewerApi: ViewerApi,
+  globalIds: string[],
+  options?: CollectElementsOptions
+): Promise<ElementData[]> => {
+  console.log('🔧 [buildAndPersistCache] START', { count: globalIds.length });
+  if (!viewerApi) return [];
+  // If viewerApi supports iterElements, prefer worker-based full extraction to speed up large builds
+  if (typeof viewerApi.iterElements === 'function') {
+    // Use buildWithWorker to extract full properties in parallel. Note: buildWithWorker expects total count
+    const total = typeof viewerApi.countElements === 'function' ? await viewerApi.countElements().catch(() => globalIds.length) : globalIds.length;
+    try {
+      const elements = await buildWithWorker(viewerApi, total, options);
+      try {
+        const token = buildCacheToken(globalIds);
+        const persistentKey = await resolvePersistentKey(token, viewerApi);
+        if (persistentKey && elements.length) {
+          // Chunk writes to avoid blocking the main thread too long
+          const CHUNK = 20000;
+          for (let i = 0; i < elements.length; i += CHUNK) {
+            const slice = elements.slice(i, i + CHUNK);
+            try {
+              await idsDb.set(persistentKey, slice);
+            } catch (err) {
+              console.warn('🔧 [buildAndPersistCache] chunk write failed', err);
+            }
+          }
+          cachedElements = { token, elements };
+          console.log(`🔧 [buildAndPersistCache] Persisted ${elements.length} elements to IndexedDB key=${persistentKey.substring(0,16)}...`);
+        }
+      } catch (err) {
+        console.warn('🔧 [buildAndPersistCache] Failed to compute key/persist', err);
+      }
+      return elements;
+    } catch (err) {
+      console.warn('🔧 [buildAndPersistCache] buildWithWorker failed, falling back to direct', err);
+      // fallback to direct per-id collection
+    }
+  }
+
+  // Fallback: direct collection for the provided ids
+  const elements = await collectElementsDirect(viewerApi, globalIds, options);
+  try {
+    const token = buildCacheToken(globalIds);
+    const persistentKey = await resolvePersistentKey(token, viewerApi);
+    if (persistentKey && elements.length) {
+      await idsDb.set(persistentKey, elements);
+      cachedElements = { token, elements };
+      console.log(`🔧 [buildAndPersistCache] Persisted ${elements.length} elements to IndexedDB key=${persistentKey.substring(0,16)}...`);
+    }
+  } catch (error) {
+    console.warn('🔧 [buildAndPersistCache] Failed to persist cache', error);
+  }
+  return elements;
+};
+
+/**
+ * Build and persist using worker-based extraction (cancellable). Returns a controller to cancel.
+ */
+export const buildAndPersistCacheWithWorkers = async (
+  viewerApi: ViewerApi,
+  globalIds: string[],
+  onProgress?: (progress: BuildProgress) => void,
+  abortSignal?: AbortSignal
+): Promise<ElementData[]> => {
+  if (!viewerApi) return [];
+  if (!globalIds.length) return [];
+
+  // If iterElements not available, fallback to the non-streaming path
+  if (typeof viewerApi.iterElements !== 'function') {
+    return buildAndPersistCache(viewerApi, globalIds, { onProgress: onProgress as any });
+  }
+
+  const total = typeof viewerApi.countElements === 'function' ? await viewerApi.countElements().catch(() => globalIds.length) : globalIds.length;
+  const token = buildCacheToken(globalIds);
+  const persistentKey = await resolvePersistentKey(token, viewerApi);
+  if (!persistentKey) {
+    // Cannot persist without a key; just run a normal build
+    return buildAndPersistCache(viewerApi, globalIds, { onProgress: onProgress as any });
+  }
+
+  // Worker pool streaming implementation
+  const workerCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+  const workers: Worker[] = [];
+  let cancelled = false;
+  let done = 0;
+  let propertiesDone = 0;
+
+  try {
+    for (let i = 0; i < workerCount; i++) {
+      const worker = new Worker(new URL('../workers/buildProps.worker.ts', import.meta.url), { type: 'module' });
+      workers.push(worker);
+    }
+
+      // Check for existing parts/metadata to support resume
+      const existingMeta = await idsDb.getMetadata(persistentKey).catch(() => null);
+      const existingPartKeys = existingMeta?.partKeys && Array.isArray(existingMeta.partKeys) ? existingMeta.partKeys.slice().sort() : [];
+      // starting 'done' (elements already persisted)
+      done = existingMeta?.elementCount ?? 0;
+      // Start partCounter after existing parts so we append new parts
+      let partCounter = existingPartKeys.length;
+      // Load persisted IDs set for robust skipping
+      const persistedIds = await idsDb.getPersistedIds(persistentKey).catch(() => new Set<string>());
+      if (done > 0 && existingPartKeys.length) {
+        // Resume mode
+        onProgress?.({ done, total, propertiesDone, propertiesTotal: undefined });
+      }
+
+    // Attach message handlers
+    const handlers: Array<(ev: MessageEvent) => void> = [];
+    workers.forEach((worker, idx) => {
+      const handler = async (ev: MessageEvent) => {
+        const msg = ev.data as any;
+        if (!msg) return;
+        if (msg.type === 'error') {
+          // bubble up error
+          console.warn('Worker error:', msg.message);
+          cancelled = true;
+          return;
+        }
+        if (msg.type === 'progress') {
+          const pDone = msg.done ?? done;
+          const pTotal = msg.total ?? total;
+          // accumulate properties if provided in progress
+          if ((msg as any).propertiesDone) propertiesDone += (msg as any).propertiesDone;
+          onProgress?.({ done: pDone, total: pTotal, propertiesDone, propertiesTotal: undefined });
+          return;
+        }
+        if (msg.type === 'batch') {
+          const batch: ElementData[] = msg.elements ?? [];
+          const partIndex = typeof msg.partIndex === 'number' ? msg.partIndex : undefined;
+          if (batch.length) {
+            // Write batch as a part
+            try {
+              const idxToWrite = partIndex ?? Math.floor(done / 1000) + 1;
+              await idsDb.writePart(persistentKey, idxToWrite, batch);
+              // accumulate properties count if provided
+              if ((msg as any).properties) propertiesDone += (msg as any).properties;
+            } catch (err) {
+              console.warn('Failed to write part to IndexedDB', err);
+            }
+            done += batch.length;
+            onProgress?.({ done, total, propertiesDone, propertiesTotal: undefined });
+          }
+          return;
+        }
+        if (msg.type === 'done') {
+          // worker finished
+          return;
+        }
+      };
+      handlers.push(handler);
+      worker.addEventListener('message', handler);
+    });
+
+    // Distribute element batches from viewerApi.iterElements to workers
+  let workerIndex = 0;
+    for await (const batch of viewerApi.iterElements({ batchSize: 128 })) {
+      if (abortSignal?.aborted) {
+        cancelled = true;
+        break;
+      }
+      if (!Array.isArray(batch) || !batch.length) continue;
+      const payload: Array<{ globalId: string; ifcClass?: string; data: Record<string, unknown> }> = [];
+      const seen = new Set<string>();
+      // processedCount tracks how many elements we've iterated over (including skipped ones when resuming)
+      // We rely on the order of iterElements being stable between runs to skip already-persisted elements.
+      // processedCount is derived from done + number of elements seen in this run so far.
+      // We'll compute a simple per-loop offset using 'done' as the number of elements already persisted.
+      batch.forEach((item) => {
+        if (!item || typeof item !== 'object') return;
+        const rawData = (item as { data?: Record<string, unknown> }).data;
+        if (!rawData) return;
+        const globalId = extractGlobalId(rawData);
+        if (!globalId || seen.has(globalId)) return;
+        // Skip if already persisted (robust resume)
+        if (persistedIds && persistedIds.has(globalId)) return;
+        seen.add(globalId);
+        const ifcClassCandidate = typeof rawData.ifcClass === 'string' ? rawData.ifcClass : undefined;
+        payload.push({ globalId, ifcClass: ifcClassCandidate, data: rawData });
+      });
+      // If we're resuming and already have persisted elements (done > 0), we should skip the first 'done' elements from the stream.
+      // We'll maintain a counter 'streamedProcessed' in closure to track how many elements we've examined during this run.
+      // To avoid adding a new top-level variable here, we store streamedProcessed on the function scope via a Symbol property on the function.
+      // Simpler: use a closure-scoped variable by checking if a symbol exists on this function (create if missing).
+      // However, to keep changes minimal, we'll derive skip behavior from 'done' and a local static 'offsetSeen' stored on the function object.
+      // @ts-ignore - attach runtime state
+      (buildAndPersistCacheWithWorkers as any).__offsetSeen = (buildAndPersistCacheWithWorkers as any).__offsetSeen || 0;
+      // Number of elements we've already skipped/consumed from the stream in previous iterations of this run
+      // (not to be confused with 'done' which is elements already persisted from previous runs)
+      // @ts-ignore
+      let offsetSeen: number = (buildAndPersistCacheWithWorkers as any).__offsetSeen;
+      // Decide how many to skip from this batch
+      if (done > 0) {
+        // We need to skip up to remaining = done - offsetSeen
+        const remainingToSkip = Math.max(0, done - offsetSeen);
+        if (remainingToSkip >= payload.length) {
+          // skip whole payload
+          offsetSeen += payload.length;
+          // save back to closure state
+          // @ts-ignore
+          (buildAndPersistCacheWithWorkers as any).__offsetSeen = offsetSeen;
+          continue; // skip sending this batch
+        } else if (remainingToSkip > 0) {
+          // drop first 'remainingToSkip' entries from payload
+          payload.splice(0, remainingToSkip);
+          offsetSeen += remainingToSkip;
+          // save back
+          // @ts-ignore
+          (buildAndPersistCacheWithWorkers as any).__offsetSeen = offsetSeen;
+        }
+      }
+      if (payload.length) {
+        const target = workers[workerIndex];
+        const partIndex = partCounter++;
+        target.postMessage({ type: 'build-props', elements: payload, partIndex } as any);
+        workerIndex = (workerIndex + 1) % workers.length;
+      }
+    }
+
+    // Signal finalize to workers
+    workers.forEach((w) => w.postMessage({ type: 'build-props', final: true } satisfies BuildWorkerRequest));
+
+    // Wait for small grace period for workers to flush (they post batches as they process)
+    // We'll poll the metadata store to know final element count
+    // Wait until no progress for a short period or until done matches total (best-effort)
+    const CHECK_INTERVAL = 200;
+    let lastDone = done;
+    let stableCountIterations = 0;
+    while (true) {
+      if (abortSignal?.aborted) {
+        cancelled = true;
+        break;
+      }
+      // If workers have completed and no more progress for a few intervals, break
+      if (done === lastDone) {
+        stableCountIterations += 1;
+      } else {
+        stableCountIterations = 0;
+        lastDone = done;
+      }
+      if (stableCountIterations > 5) break;
+      // If we've reached expected total, break
+      if (total && done >= total) break;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, CHECK_INTERVAL));
+    }
+
+    // Read back persisted parts and assemble
+    const partKeys = await idsDb.listParts(persistentKey);
+    const persisted: ElementData[] = [];
+    for (const partKey of partKeys) {
+      try {
+        const part = await idsDb.get(partKey);
+        if (part && part.length) persisted.push(...part);
+      } catch (err) {
+        console.warn('Failed to read part', partKey, err);
+      }
+    }
+    cachedElements = { token, elements: persisted };
+    onProgress?.({ done: persisted.length, total });
+    return persisted;
+  } finally {
+    // Terminate and cleanup handlers
+    workers.forEach((w, i) => {
+      try {
+        w.postMessage({ type: 'cancel' } satisfies BuildWorkerRequest);
+      } catch {}
+      try {
+        w.terminate();
+      } catch {}
+    });
+  }
+};
+
+/**
+ * Incremental property extraction with signature validation and smart caching.
+ * Extracts properties in batches, checks if model changed, and only processes new/changed elements.
+ */
+export const extractPropertiesIncremental = async (
+  viewerApi: ViewerApi,
+  onProgress?: (progress: { done: number; total?: number; phase: string }) => void,
+  abortSignal?: AbortSignal,
+  options?: {
+    ifcTypes?: string[]; // Optional: only extract these IFC types
+    batchSize?: number; // Elements per batch (default 2000 for faster processing)
+  }
+): Promise<ElementData[]> => {
+  console.log('🚀 [extractPropertiesIncremental] START', { batchSize: options?.batchSize, ifcTypes: options?.ifcTypes });
+  
+  const batchSize = options?.batchSize ?? 2000;
+  const ifcFilter = options?.ifcTypes && options.ifcTypes.length > 0 ? options.ifcTypes : null;
+  
+  console.log('📝 [extractPropertiesIncremental] Configuration:', { batchSize, ifcFilter });
+  
+  onProgress?.({ done: 0, total: undefined, phase: 'Checking model signature...' });
+  
+  // Get current model signature
+  console.log('🔍 [extractPropertiesIncremental] Getting model signature...');
+  let currentSignature: { signature: string; elementCount: number; modelFiles: Array<{ id: string; name: string }> } | null = null;
+  try {
+    if (typeof viewerApi.getModelSignature === 'function') {
+      console.log('📞 [extractPropertiesIncremental] Calling viewerApi.getModelSignature()...');
+      currentSignature = await viewerApi.getModelSignature();
+      console.log('✅ [extractPropertiesIncremental] Got signature:', currentSignature);
+    } else {
+      console.warn('⚠️ [extractPropertiesIncremental] getModelSignature not available on viewerApi');
+    }
+  } catch (error) {
+    console.error('❌ [extractPropertiesIncremental] Failed to get model signature', error);
+  }
+  
+  if (!currentSignature || currentSignature.elementCount === 0) {
+    console.warn('⚠️ [extractPropertiesIncremental] No elements found in model', currentSignature);
+    return [];
+  }
+  
+  console.log('🔑 [extractPropertiesIncremental] Computing storage key...');
+  // Compute storage key
+  const persistentKey = await computeModelKey({ 
+    modelUrl: currentSignature.signature, 
+    extra: String(currentSignature.elementCount) 
+  });
+  console.log('🔑 [extractPropertiesIncremental] Storage key:', persistentKey.substring(0, 20) + '...');
+  
+  // Check if signature matches (cache still valid)
+  console.log('🔍 [extractPropertiesIncremental] Checking if signature is valid...');
+  const signatureValid = await idsDb.isSignatureValid(persistentKey, currentSignature.signature);
+  console.log('🔍 [extractPropertiesIncremental] Signature valid:', signatureValid);
+  
+  if (signatureValid) {
+    console.log('⚡ [extractPropertiesIncremental] Cache is valid, reading cached data...');
+    onProgress?.({ done: 0, total: currentSignature.elementCount, phase: 'Using cached data (model unchanged)' });
+    // Read cached data
+    try {
+      const cached = await idsDb.readAllParts(persistentKey);
+      if (cached && cached.length > 0) {
+        console.log(`✅ [extractPropertiesIncremental] Using cached properties: ${cached.length} elements (signature valid)`);
+        onProgress?.({ done: cached.length, total: currentSignature.elementCount, phase: 'Cache loaded' });
+        return cached;
+      } else {
+        console.warn('⚠️ [extractPropertiesIncremental] Signature valid but no cached data found');
+      }
+    } catch (error) {
+      console.warn('⚠️ [extractPropertiesIncremental] Failed to read cached data, will rebuild', error);
+    }
+  } else {
+    console.log('🔄 [extractPropertiesIncremental] Model signature changed or no cache - extracting properties...');
+    // Clear old cache for this key
+    try {
+      await idsDb.removeParts(persistentKey);
+      console.log('🗑️ [extractPropertiesIncremental] Cleared old cache parts');
+    } catch (error) {
+      console.warn('⚠️ [extractPropertiesIncremental] Failed to remove old parts', error);
+    }
+  }
+  
+  // Extract properties using iterElements
+  console.log('🔍 [extractPropertiesIncremental] Checking if iterElements is available...');
+  if (typeof viewerApi.iterElements !== 'function') {
+    console.error('❌ [extractPropertiesIncremental] iterElements not available');
+    throw new Error('extractPropertiesIncremental: iterElements not available');
+  }
+  console.log('✅ [extractPropertiesIncremental] iterElements is available');
+  
+  onProgress?.({ done: 0, total: currentSignature.elementCount, phase: 'Extracting properties...' });
+  
+  // Worker pool for parallel extraction
+  const workerCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+  console.log(`👷 [extractPropertiesIncremental] Creating worker pool with ${workerCount} workers...`);
+  const workers: Worker[] = [];
+  let done = 0;
+  let partIndex = 0;
+  const allExtracted: ElementData[] = [];
+  
+  try {
+    // Create worker pool
+    for (let i = 0; i < workerCount; i++) {
+      console.log(`👷 [extractPropertiesIncremental] Creating worker ${i + 1}/${workerCount}...`);
+      const worker = new Worker(new URL('../workers/buildProps.worker.ts', import.meta.url), { type: 'module' });
+      workers.push(worker);
+    }
+    console.log(`✅ [extractPropertiesIncremental] Worker pool created with ${workers.length} workers`);
+    
+    // Attach message handlers
+    const handlers: Array<(ev: MessageEvent) => void> = [];
+    workers.forEach((worker, idx) => {
+      const handler = async (ev: MessageEvent) => {
+        const msg = ev.data as any;
+        if (!msg) return;
+        
+        if (msg.type === 'error') {
+          console.error(`❌ [extractPropertiesIncremental] Worker ${idx} error:`, msg.message);
+          return;
+        }
+        
+        if (msg.type === 'batch') {
+          const batch: ElementData[] = msg.elements ?? [];
+          if (batch.length) {
+            // Apply IFC filter if specified
+            const filtered = ifcFilter 
+              ? batch.filter(el => ifcFilter.includes(el.ifcClass))
+              : batch;
+            
+            if (filtered.length) {
+              // Write to DB immediately
+              try {
+                const idx = ++partIndex;
+                await idsDb.writePart(persistentKey, idx, filtered);
+                done += filtered.length;
+                allExtracted.push(...filtered);
+                
+                // Log progress every 5000 elements
+                if (done % 5000 < filtered.length || done === filtered.length) {
+                  console.log(`💾 [extractPropertiesIncremental] Saved ${done.toLocaleString()} elements...`);
+                }
+                
+                onProgress?.({ 
+                  done, 
+                  total: currentSignature!.elementCount, 
+                  phase: `Extracted ${done.toLocaleString()} / ${currentSignature!.elementCount.toLocaleString()}` 
+                });
+              } catch (error) {
+                console.error('❌ [extractPropertiesIncremental] Failed to write batch', error);
+              }
+            }
+          }
+        }
+      };
+      handlers.push(handler);
+      worker.addEventListener('message', handler);
+    });
+    console.log(`✅ [extractPropertiesIncremental] ${workers.length} workers ready`);
+    
+    // Distribute batches from iterElements
+    console.log('🔄 [extractPropertiesIncremental] Starting to iterate elements...');
+    let workerIndex = 0;
+    let batchBuffer: Array<{ globalId: string; ifcClass?: string; data: Record<string, unknown> }> = [];
+    let iterationCount = 0;
+    let totalProcessed = 0;
+    
+    for await (const batch of viewerApi.iterElements({ batchSize })) {
+      iterationCount++;
+      
+      if (abortSignal?.aborted) {
+        console.log('🛑 [extractPropertiesIncremental] Aborted by user');
+        break;
+      }
+      if (!Array.isArray(batch) || !batch.length) {
+        continue;
+      }
+      
+      for (const item of batch) {
+        if (!item || typeof item !== 'object') continue;
+        
+        const raw = (item as any).data;
+        if (!raw) continue;
+        
+        const globalId = extractGlobalId(raw);
+        if (!globalId) continue;
+        
+        const ifcClass = typeof raw.ifcClass === 'string' ? raw.ifcClass : undefined;
+        
+        // Apply IFC filter early if specified (skip extraction for unwanted types)
+        if (ifcFilter && ifcClass && !ifcFilter.includes(ifcClass)) {
+          continue;
+        }
+        
+        batchBuffer.push({ globalId, ifcClass, data: raw });
+        totalProcessed++;
+        
+        // Send batch to worker when buffer is full
+        if (batchBuffer.length >= batchSize) {
+          const target = workers[workerIndex];
+          target.postMessage({ type: 'build-props', elements: batchBuffer, partIndex: partIndex + 1 } as any);
+          workerIndex = (workerIndex + 1) % workers.length;
+          batchBuffer = [];
+          
+          // Log progress every 10000 elements
+          if (totalProcessed % 10000 === 0) {
+            console.log(`📊 [extractPropertiesIncremental] Processed ${totalProcessed} elements...`);
+          }
+        }
+      }
+    }
+    
+    console.log(`✅ [extractPropertiesIncremental] Finished iterating: ${totalProcessed} elements in ${iterationCount} batches`);
+    
+    // Send remaining buffer
+    if (batchBuffer.length > 0) {
+      console.log(`📤 [extractPropertiesIncremental] Sending final batch of ${batchBuffer.length} elements to worker ${workerIndex}...`);
+      const target = workers[workerIndex];
+      target.postMessage({ type: 'build-props', elements: batchBuffer, partIndex: partIndex + 1 } as any);
+    }
+    
+    // Signal finalize
+    console.log(`🏁 [extractPropertiesIncremental] Signaling workers to finalize...`);
+    workers.forEach((w, idx) => {
+      console.log(`🏁 [extractPropertiesIncremental] Sending finalize to worker ${idx}...`);
+      w.postMessage({ type: 'build-props', final: true } as any);
+    });
+    
+    // Wait for workers to finish
+    console.log('⏳ [extractPropertiesIncremental] Waiting for workers to finish (500ms grace period)...');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    console.log(`✅ [extractPropertiesIncremental] Workers finished. Total extracted: ${done}`);
+    
+    // Update signature in metadata
+    console.log('💾 [extractPropertiesIncremental] Updating signature in metadata...');
+    await idsDb.updateSignature(persistentKey, currentSignature.signature, currentSignature.modelFiles);
+    console.log('✅ [extractPropertiesIncremental] Signature updated');
+    
+    onProgress?.({ done, total: currentSignature.elementCount, phase: 'Extraction complete' });
+    
+    console.log(`✅ [extractPropertiesIncremental] COMPLETE: Extracted ${done} elements to IndexedDB`);
+    return allExtracted;
+    
+  } finally {
+    // Cleanup workers
+    console.log('🧹 [extractPropertiesIncremental] Cleaning up workers...');
+    workers.forEach((w, idx) => {
+      try { 
+        console.log(`🧹 [extractPropertiesIncremental] Terminating worker ${idx}...`);
+        w.postMessage({ type: 'cancel' } as any); 
+      } catch (e) {
+        console.warn(`⚠️ [extractPropertiesIncremental] Failed to send cancel to worker ${idx}`, e);
+      }
+      try { 
+        w.terminate(); 
+      } catch (e) {
+        console.warn(`⚠️ [extractPropertiesIncremental] Failed to terminate worker ${idx}`, e);
+      }
+    });
+    console.log('✅ [extractPropertiesIncremental] Workers cleaned up');
+  }
+};
+
+// New: stream from iterElements directly and persist per-part. Useful when listGlobalIds is slow/unavailable.
+export const buildAndPersistFromIter = async (
+  viewerApi: ViewerApi,
+  scope: 'current' | 'all',
+  onProgress?: (progress: BuildProgress) => void,
+  abortSignal?: AbortSignal
+): Promise<ElementData[]> => {
+  if (!viewerApi) return [];
+  if (typeof viewerApi.iterElements !== 'function') {
+    console.warn('buildAndPersistFromIter: iterElements not available, falling back');
+    return [];
+  }
+
+  // Compute token based on scope and element count (best-effort)
+  let total: number | undefined = undefined;
+  try {
+    if (typeof viewerApi.countElements === 'function') {
+      total = await viewerApi.countElements().catch(() => undefined);
+    }
+  } catch {}
+
+  const tokenBase = scope === 'current' ? `SCOPE:CURRENT` : `SCOPE:ALL`;
+  const token = `${tokenBase}::${total ?? 'unknown'}`;
+  const persistentKey = await (async () => {
+    try {
+      return await computeModelKey({ modelUrl: token, extra: total != null ? String(total) : undefined });
+    } catch (e) {
+      console.warn('buildAndPersistFromIter: computeModelKey failed', e);
+      return null;
+    }
+  })();
+
+  // Worker pool similar to buildAndPersistCacheWithWorkers
+  const workerCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+  const workers: Worker[] = [];
+  let done = 0;
+  let propertiesDone = 0;
+
+  try {
+    for (let i = 0; i < workerCount; i++) {
+      const worker = new Worker(new URL('../workers/buildProps.worker.ts', import.meta.url), { type: 'module' });
+      workers.push(worker);
+    }
+
+    // Attach handlers
+    const handlers: Array<(ev: MessageEvent) => void> = [];
+    workers.forEach((worker) => {
+      const handler = async (ev: MessageEvent) => {
+        const msg = ev.data as any;
+        if (!msg) return;
+        if (msg.type === 'progress') {
+          if ((msg as any).propertiesDone) propertiesDone += (msg as any).propertiesDone;
+          onProgress?.({ done, total: total ?? 0, propertiesDone, propertiesTotal: undefined });
+          return;
+        }
+        if (msg.type === 'batch') {
+          const batch: ElementData[] = msg.elements ?? [];
+          const partIndex = typeof msg.partIndex === 'number' ? msg.partIndex : undefined;
+          if (batch.length) {
+            try {
+              const idxToWrite = partIndex ?? Math.floor(done / 1000) + 1;
+              if (persistentKey) await idsDb.writePart(persistentKey, idxToWrite, batch);
+              if ((msg as any).properties) propertiesDone += (msg as any).properties;
+            } catch (err) {
+              console.warn('buildAndPersistFromIter: Failed to write part', err);
+            }
+            done += batch.length;
+            onProgress?.({ done, total: total ?? 0, propertiesDone, propertiesTotal: undefined });
+          }
+          return;
+        }
+      };
+      handlers.push(handler);
+      worker.addEventListener('message', handler);
+    });
+
+    // Distribute iterElements batches
+    let workerIndex = 0;
+    let partCounter = 0;
+    for await (const batch of viewerApi.iterElements({ batchSize: 256 })) {
+      if (abortSignal?.aborted) break;
+      if (!Array.isArray(batch) || !batch.length) continue;
+      const payload: Array<{ globalId: string; ifcClass?: string; data: Record<string, unknown> }> = [];
+      const seen = new Set<string>();
+      for (const item of batch) {
+        if (!item || typeof item !== 'object') continue;
+        const raw = (item as any).data;
+        if (!raw) continue;
+        const gid = extractGlobalId(raw);
+        if (!gid || seen.has(gid)) continue;
+        seen.add(gid);
+        const ifcClassCandidate = typeof raw.ifcClass === 'string' ? raw.ifcClass : undefined;
+        payload.push({ globalId: gid, ifcClass: ifcClassCandidate, data: raw });
+      }
+      if (payload.length) {
+        const target = workers[workerIndex];
+        const partIndex = ++partCounter;
+        target.postMessage({ type: 'build-props', elements: payload, partIndex } as any);
+        workerIndex = (workerIndex + 1) % workers.length;
+      }
+    }
+
+    // Signal finalize
+    workers.forEach((w) => w.postMessage({ type: 'build-props', final: true } as any));
+
+    // Wait for flushing/progress stability
+    const CHECK_INTERVAL = 200;
+    let lastDone = done;
+    let stableIterations = 0;
+    while (true) {
+      if (abortSignal?.aborted) break;
+      if (done === lastDone) stableIterations++; else { stableIterations = 0; lastDone = done; }
+      if (stableIterations > 5) break;
+      if (total && done >= total) break;
+      await new Promise((r) => setTimeout(r, CHECK_INTERVAL));
+    }
+
+    // Read back persisted parts
+    const persisted: ElementData[] = [];
+    if (persistentKey) {
+      const partKeys = await idsDb.listParts(persistentKey);
+      for (const pk of partKeys) {
+        try {
+          const part = await idsDb.get(pk);
+          if (part && part.length) persisted.push(...part);
+        } catch (err) {
+          console.warn('buildAndPersistFromIter: failed to read part', pk, err);
+        }
+      }
+    }
+    onProgress?.({ done: persisted.length, total: total ?? 0, propertiesDone, propertiesTotal: undefined });
+    return persisted;
+  } finally {
+    workers.forEach((w) => {
+      try { w.postMessage({ type: 'cancel' } as any); } catch {}
+      try { w.terminate(); } catch {}
+    });
+  }
+};

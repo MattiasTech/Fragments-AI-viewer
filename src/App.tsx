@@ -34,6 +34,7 @@ import Draggable from 'react-draggable';
 import CloseIcon from '@mui/icons-material/Close';
 import MinimizeIcon from '@mui/icons-material/Minimize';
 import OpenInFullIcon from '@mui/icons-material/OpenInFull';
+import FilterListIcon from '@mui/icons-material/FilterList';
 import ViewListIcon from '@mui/icons-material/ViewList';
 import ChatIcon from '@mui/icons-material/Chat';
 import RuleIcon from '@mui/icons-material/Rule';
@@ -57,6 +58,7 @@ import type { SelectionCommand } from './ChatWindow';
 const ChatWindow = React.lazy(() => import('./ChatWindow'));
 const IdsPanel = React.lazy(() => import('./ids/IdsPanel'));
 const IdsCreatorPanel = React.lazy(() => import('./ids/IdsCreatorPanel'));
+const ModelFilterPanel = React.lazy(() => import('./explorer/ModelFilterPanel'));
 import { idsStore } from './ids/ids.store';
 import type { ElementData, ViewerApi } from './ids/ids.types';
 
@@ -1172,6 +1174,20 @@ const App: React.FC = () => {
           });
           await new Promise((r) => setTimeout(r, 0));
         }
+                    <Button size="small" variant="outlined" onClick={async () => {
+                      const api = viewerApiRef.current;
+                      if (!api || typeof (api as any).buildIdsCache !== 'function') {
+                        alert('Build cache is not available in the current viewer API');
+                        return;
+                      }
+                      try {
+                        const count = await (api as any).buildIdsCache();
+                        alert(`Built ids cache with ${count} elements`);
+                      } catch (err) {
+                        console.error('Build cache failed', err);
+                        alert(`Build cache failed: ${String(err)}`);
+                      }
+                    }}>Build cache</Button>
 
   // inspectModelProperties stats available in variable 'stats'
         console.log('inspectModelProperties examples (up to 6):', examples);
@@ -1193,6 +1209,7 @@ const App: React.FC = () => {
   const [properties, setProperties] = useState<Record<string, any> | null>(null);
   const [isExplorerOpen, setIsExplorerOpen] = useState(true);
   const [isExplorerMinimized, setIsExplorerMinimized] = useState(false);
+  const [isFilterDialogOpen, setIsFilterDialogOpen] = useState(false);
   const [ifcProgress, setIfcProgress] = useState<number | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
   const [componentsReady, setComponentsReady] = useState(false);
@@ -1718,6 +1735,72 @@ const App: React.FC = () => {
     return `${ids.join('|')}|${models.length}`;
   }, [models]);
 
+  // Compute comprehensive model signature for cache invalidation
+  const computeModelSignature = useCallback(async (): Promise<{
+    signature: string;
+    elementCount: number;
+    modelFiles: Array<{ id: string; name: string }>;
+  }> => {
+    console.log('🔑 [computeModelSignature] START');
+    const fragments = fragmentsRef.current;
+    
+    if (!fragments || fragments.list.size === 0) {
+      console.log('⚠️ [computeModelSignature] No fragments available');
+      return { signature: 'empty', elementCount: 0, modelFiles: [] };
+    }
+
+    console.log(`📊 [computeModelSignature] Found ${fragments.list.size} models in fragments`);
+
+    // Collect model IDs sorted
+    const modelIds = Array.from(fragments.list.keys()).sort();
+    console.log('🔑 [computeModelSignature] Model IDs:', modelIds);
+    
+    // Collect model names from the models state
+    const modelFiles = models.map(m => ({ id: m.id, name: m.label }));
+    console.log('📁 [computeModelSignature] Model files:', modelFiles);
+    
+    // Count total elements across all models
+    console.log('🔢 [computeModelSignature] Counting elements across all models...');
+    let totalElements = 0;
+    for (const [modelId, model] of fragments.list) {
+      console.log(`🔍 [computeModelSignature] Getting local IDs for model ${modelId}...`);
+      try {
+        const fetched = await model.getLocalIds();
+        console.log(`✅ [computeModelSignature] Got local IDs for model ${modelId}, type:`, typeof fetched);
+        const localIds = Array.isArray(fetched) 
+          ? fetched 
+          : (fetched && typeof (fetched as any)[Symbol.iterator] === 'function')
+            ? Array.from(fetched as Iterable<number>)
+            : [];
+        console.log(`📊 [computeModelSignature] Model ${modelId} has ${localIds.length} elements`);
+        totalElements += localIds.length;
+      } catch (error) {
+        console.error(`❌ [computeModelSignature] Failed to count elements in model ${modelId}`, error);
+      }
+    }
+
+    console.log(`📊 [computeModelSignature] Total elements across all models: ${totalElements}`);
+
+    // Build signature: modelIds + names + element count
+    const parts = [
+      ...modelIds,
+      ...models.map(m => `${m.id}:${m.label}`),
+      `count:${totalElements}`
+    ];
+    const signature = parts.join('|');
+    
+    console.log('🔑 [computeModelSignature] Generated signature (first 100 chars):', signature.substring(0, 100));
+
+    const result = {
+      signature,
+      elementCount: totalElements,
+      modelFiles
+    };
+    
+    console.log('✅ [computeModelSignature] COMPLETE:', result);
+    return result;
+  }, [models]);
+
   const ensureIdsCache = useCallback(async (): Promise<IdsCache> => {
     const fragments = fragmentsRef.current;
     if (!fragments || fragments.list.size === 0) {
@@ -1832,45 +1915,41 @@ const App: React.FC = () => {
     async (globalIds: string[]) => {
       const grouped = new Map<string, number[]>();
       
-      console.log(`🔍 [groupLocalIdsByModel] Grouping ${globalIds.length} GlobalIds...`);
+      console.log(`🔍 [groupLocalIdsByModel] Grouping ${globalIds.length} GlobalIds using ThatOpen API...`);
       
-      // Use cache (which should now contain validated elements)
-      const cache = idsCacheRef.current;
-      
-      if (!cache || cache.records.size === 0) {
-        console.warn(`🔍 [groupLocalIdsByModel] Cache is empty, building full cache...`);
-        const fullCache = await ensureIdsCache();
-        globalIds.forEach((id) => {
-          const record = fullCache.records.get(id);
-          if (!record) {
-            console.warn(`🔍 [groupLocalIdsByModel] GlobalId not found in cache: ${id}`);
-            return;
-          }
-          const existing = grouped.get(record.modelId);
-          if (existing) existing.push(record.localId);
-          else grouped.set(record.modelId, [record.localId]);
-        });
-        console.log(`🔍 [groupLocalIdsByModel] Grouped ${globalIds.length} GlobalIds into ${grouped.size} models`);
-        return { grouped, cache: fullCache };
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.error(`🔍 [groupLocalIdsByModel] Fragments not available`);
+        return { grouped, cache: idsCacheRef.current };
       }
       
-      // Use existing cache
-      console.log(`🔍 [groupLocalIdsByModel] Using existing cache with ${cache.records.size} elements`);
-      globalIds.forEach((id) => {
-        const record = cache.records.get(id);
-        if (!record) {
-          console.warn(`🔍 [groupLocalIdsByModel] GlobalId not found in cache: ${id}`);
-          return;
+      // Use ThatOpen's getLocalIdsByGuids() - much faster, no cache needed!
+      for (const [modelId, model] of fragments.list) {
+        try {
+          // Get local IDs for all globalIds in this model at once (batch operation)
+          const localIds = await model.getLocalIdsByGuids(globalIds);
+          
+          // Filter out nulls and add to grouped map
+          const validLocalIds: number[] = [];
+          for (let i = 0; i < localIds.length; i++) {
+            const localId = localIds[i];
+            if (localId !== null) {
+              validLocalIds.push(localId);
+            }
+          }
+          
+          if (validLocalIds.length > 0) {
+            grouped.set(modelId, validLocalIds);
+          }
+        } catch (error) {
+          console.warn(`🔍 [groupLocalIdsByModel] Failed for model ${modelId}:`, error);
         }
-        const existing = grouped.get(record.modelId);
-        if (existing) existing.push(record.localId);
-        else grouped.set(record.modelId, [record.localId]);
-      });
+      }
       
-      console.log(`🔍 [groupLocalIdsByModel] Grouped ${globalIds.length} GlobalIds into ${grouped.size} models`);
-      return { grouped, cache };
+      console.log(`🔍 [groupLocalIdsByModel] Grouped ${globalIds.length} GlobalIds into ${grouped.size} models (${Array.from(grouped.values()).reduce((sum, arr) => sum + arr.length, 0)} total local IDs)`);
+      return { grouped, cache: idsCacheRef.current };
     },
-    [ensureIdsCache]
+    [] // No dependencies - uses fragmentsRef directly
   );
 
   const viewerApi = React.useMemo<ViewerApi>(() => ({
@@ -2052,6 +2131,86 @@ const App: React.FC = () => {
       return cache.elements.length;
     },
     iterElements: (options) => {
+      const batchSize = Math.max(1, Math.floor(options?.batchSize ?? 500));
+      console.log('🔄 [viewerApi.iterElements] START', { batchSize });
+      return {
+        async *[Symbol.asyncIterator]() {
+          const fragments = fragmentsRef.current;
+          if (!fragments || fragments.list.size === 0) {
+            console.warn('⚠️ [viewerApi.iterElements] No fragments available');
+            return;
+          }
+          
+          console.log(`🔄 [viewerApi.iterElements] Processing ${fragments.list.size} models with batch size ${batchSize}`);
+          
+          let accumulator: Array<{ modelId: string; localId: number; data: Record<string, unknown> }> = [];
+          let totalYielded = 0;
+          
+          // Iterate directly from fragments without building full cache
+          for (const [modelId, model] of fragments.list) {
+            // Get local IDs for this model
+            let localIds: number[] = [];
+            try {
+              const fetched = await model.getLocalIds();
+              localIds = Array.isArray(fetched) 
+                ? fetched 
+                : (fetched && typeof (fetched as any)[Symbol.iterator] === 'function')
+                  ? Array.from(fetched as Iterable<number>)
+                  : [];
+              console.log(`✅ [viewerApi.iterElements] Model ${modelId}: ${localIds.length} elements`);
+            } catch (error) {
+              console.error(`❌ [viewerApi.iterElements] Failed to get local IDs for model ${modelId}`, error);
+              continue;
+            }
+            
+            // Fetch in larger chunks for efficiency - use batchSize as chunk size
+            const chunkSize = Math.min(500, Math.max(100, batchSize));
+            for (let index = 0; index < localIds.length; index += chunkSize) {
+              const chunk = localIds.slice(index, index + chunkSize);
+              
+              try {
+                const itemsData = await model.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
+                
+                // Add to accumulator
+                for (let i = 0; i < itemsData.length; i++) {
+                  const data = itemsData[i];
+                  if (data) {
+                    accumulator.push({
+                      modelId,
+                      localId: chunk[i],
+                      data: data as Record<string, unknown>,
+                    });
+                  }
+                }
+                
+                // Yield when accumulator reaches batch size
+                while (accumulator.length >= batchSize) {
+                  const toYield = accumulator.splice(0, batchSize);
+                  totalYielded += toYield.length;
+                  if (totalYielded % 5000 === 0 || totalYielded === batchSize) {
+                    console.log(`📤 [viewerApi.iterElements] Yielded ${totalYielded} elements...`);
+                  }
+                  yield toYield;
+                }
+              } catch (error) {
+                console.error(`❌ [viewerApi.iterElements] Failed to fetch chunk at ${index}`, error);
+              }
+            }
+          }
+          
+          // Yield remaining elements
+          if (accumulator.length > 0) {
+            totalYielded += accumulator.length;
+            yield accumulator;
+          }
+          
+          console.log(`✅ [viewerApi.iterElements] Complete: ${totalYielded} elements`);
+        },
+      };
+    },
+    // DEPRECATED: Use iterElements for incremental extraction instead
+    // This method is kept for compatibility but triggers full cache build
+    _iterElementsLegacy: (options?: { batchSize?: number }) => {
       const batchSize = Math.max(1, Math.floor(options?.batchSize ?? 100));
       return {
         async *[Symbol.asyncIterator]() {
@@ -2072,6 +2231,20 @@ const App: React.FC = () => {
           }
         },
       };
+    },
+    // Expose a buildIdsCache helper to force building the ids cache
+    buildIdsCache: async (): Promise<number> => {
+      try {
+        const cache = await ensureIdsCache();
+        return cache.elements.length;
+      } catch (err) {
+        console.error('viewerApi.buildIdsCache failed', err);
+        throw err;
+      }
+    },
+    // Get comprehensive model signature for cache validation
+    getModelSignature: async () => {
+      return await computeModelSignature();
     },
     addToCache: async (globalIds: string[]) => {
       // Add elements to the cache incrementally
@@ -2440,6 +2613,86 @@ const App: React.FC = () => {
       if (!hider) return;
       await Promise.resolve(hider.set(true));
     },
+    // On-demand property loading (ThatOpen pattern)
+    getItemsData: async (globalIds: string[], config?: any) => {
+      console.log('🔍 [getItemsData] START', { globalIds: globalIds.length, config });
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.error('🔍 [getItemsData] Fragments not available');
+        return [];
+      }
+      
+      // Group by model
+      const { grouped } = await groupLocalIdsByModel(globalIds);
+      const results: any[] = [];
+      
+      for (const [modelId, localIds] of grouped.entries()) {
+        const model = fragments.list.get(modelId);
+        if (!model) continue;
+        
+        try {
+          // Fetch data with ThatOpen config pattern
+          const data = await model.getItemsData(Array.from(localIds), config);
+          results.push(...data);
+        } catch (error) {
+          console.error(`🔍 [getItemsData] Failed for model ${modelId}`, error);
+        }
+      }
+      
+      console.log('✅ [getItemsData] Complete:', results.length, 'items');
+      return results;
+    },
+    getItemsByCategory: async (categories: RegExp[]) => {
+      console.log('🔍 [getItemsByCategory] START', { categories: categories.length });
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.error('🔍 [getItemsByCategory] Fragments not available');
+        return {};
+      }
+      
+      const result: Record<string, number[]> = {};
+      
+      for (const [modelId, model] of fragments.list) {
+        try {
+          const items = await model.getItemsOfCategories(categories);
+          if (items && Object.keys(items).length > 0) {
+            // Flatten and deduplicate
+            const localIds = Object.values(items).flat();
+            if (localIds.length > 0) {
+              result[modelId] = localIds;
+            }
+          }
+        } catch (error) {
+          console.error(`🔍 [getItemsByCategory] Failed for model ${modelId}`, error);
+        }
+      }
+      
+      console.log('✅ [getItemsByCategory] Complete:', Object.keys(result).length, 'models');
+      return result;
+    },
+    getItemsDataByModel: async (modelId: string, localIds: number[], config?: any) => {
+      console.log('🔍 [getItemsDataByModel] START', { modelId, localIds: localIds.length, config });
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.error('🔍 [getItemsDataByModel] Fragments not available');
+        return [];
+      }
+      
+      const model = fragments.list.get(modelId);
+      if (!model) {
+        console.error(`🔍 [getItemsDataByModel] Model ${modelId} not found`);
+        return [];
+      }
+      
+      try {
+        const data = await model.getItemsData(localIds, config);
+        console.log('✅ [getItemsDataByModel] Complete:', data.length, 'items');
+        return data as any; // Fragment's ItemData is compatible with our ItemData type
+      } catch (error) {
+        console.error(`🔍 [getItemsDataByModel] Failed for model ${modelId}`, error);
+        return [];
+      }
+    },
     fitViewTo: async (globalIds) => {
       if (!globalIds.length) return;
       const world = worldRef.current;
@@ -2487,7 +2740,7 @@ const App: React.FC = () => {
         threeCamera.lookAt(center);
       }
     },
-  }), [ensureIdsCache, groupLocalIdsByModel]);
+  }), [groupLocalIdsByModel]); // ensureIdsCache removed - no longer needed!
 
   viewerApiRef.current = viewerApi;
 
@@ -4384,7 +4637,20 @@ const App: React.FC = () => {
                 >
                   {isExplorerMinimized ? <OpenInFullIcon /> : <MinimizeIcon />}
                 </IconButton>
-                <IconButton 
+                  <Tooltip title="Open parametric filter">
+                    <span>
+                      <IconButton
+                        size="small"
+                        color="inherit"
+                        onClick={() => setIsFilterDialogOpen(true)}
+                        title="Parametric Filter"
+                        sx={{ mr: 0.5 }}
+                      >
+                        <FilterListIcon />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <IconButton 
                   size="small" 
                   color="inherit" 
                   onClick={handleExplorerClose}
@@ -4449,6 +4715,23 @@ const App: React.FC = () => {
                       {isModelsSectionCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
                     </IconButton>
                   </Box>
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                      <Tooltip title={componentsReady ? 'Open parametric model filter' : 'Viewer loading — model tools not ready yet'}>
+                        <span>
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="primary"
+                            onClick={() => setIsFilterDialogOpen(true)}
+                            startIcon={<FilterListIcon />}
+                            disabled={false}
+                            sx={{ minWidth: 140 }}
+                          >
+                            Parametric Filter
+                          </Button>
+                        </span>
+                      </Tooltip>
+                    </Box>
                   <Collapse
                     in={!isModelsSectionCollapsed}
                     timeout="auto"
@@ -5262,6 +5545,13 @@ const App: React.FC = () => {
           </IconButton>
         </Paper>
       )}
+
+      {/* Model Filter Dialog (lazy) */}
+      <Suspense fallback={null}>
+        {isFilterDialogOpen && (
+          <ModelFilterPanel open={isFilterDialogOpen} onClose={() => setIsFilterDialogOpen(false)} viewerApi={viewerApiRef.current ?? null} />
+        )}
+      </Suspense>
 
       <Dialog open={exportDialogOpen} onClose={handleCloseExportDialog} fullWidth maxWidth="sm">
         <DialogTitle>Export properties</DialogTitle>

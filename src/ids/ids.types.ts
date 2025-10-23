@@ -10,6 +10,9 @@ export type Phase =
 export type BuildProgress = {
   done: number;
   total: number;
+  // Optional property-level progress: number of flattened property entries processed
+  propertiesDone?: number;
+  propertiesTotal?: number;
 };
 
 export type ElementData = {
@@ -37,6 +40,26 @@ export type RequirementRule = {
   sample?: Record<string, unknown> | null; // optional provenance
 };
 
+export type ItemsDataRelationConfig = {
+  attributes?: boolean;
+  relations?: boolean;
+};
+
+export type ItemsDataConfig = {
+  attributesDefault?: boolean;
+  attributes?: string[];
+  relationsDefault?: ItemsDataRelationConfig;
+  relations?: Record<string, ItemsDataRelationConfig>;
+};
+
+export type ItemData = {
+  _localId: { value: number };
+  _category: { value: string };
+  GlobalId?: { value: string };
+  Name?: { value: string };
+  [key: string]: any;
+};
+
 export interface ViewerApi {
   listGlobalIds(): Promise<string[]>;
   getSelectedGlobalIds?(): Promise<string[]>; // Optional: Get only selected elements
@@ -51,12 +74,17 @@ export interface ViewerApi {
     attributes?: Record<string, unknown>;
   }>;
   addToCache?(globalIds: string[]): Promise<void>; // Add elements to cache incrementally
+  selectGlobalIds?(globalIds: string[]): Promise<void> | void; // Select elements in the viewer by GlobalId
   isolate(globalIds: string[]): Promise<void> | void;
   color(globalIds: string[], rgba: RgbaColor): Promise<void> | void;
   clearColors(): Promise<void> | void;
   fitViewTo(globalIds: string[]): Promise<void> | void;
   clearIsolation(): Promise<void> | void;
   countElements(): Promise<number>;
+  // On-demand property loading (ThatOpen pattern)
+  getItemsData?(globalIds: string[], config?: ItemsDataConfig): Promise<ItemData[]>;
+  getItemsByCategory?(categories: RegExp[]): Promise<Record<string, number[]>>;
+  getItemsDataByModel?(modelId: string, localIds: number[], config?: ItemsDataConfig): Promise<ItemData[]>;
   iterElements(options?: { batchSize?: number }): AsyncIterable<
     Array<{
       modelId: string;
@@ -64,6 +92,11 @@ export interface ViewerApi {
       data: Record<string, unknown>;
     }>
   >;
+  getModelSignature?(): Promise<{
+    signature: string;
+    elementCount: number;
+    modelFiles: Array<{ id: string; name: string }>;
+  }>;
 }
 
 export type RgbaColor = {
