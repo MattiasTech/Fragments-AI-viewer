@@ -2003,32 +2003,135 @@ const App: React.FC = () => {
       console.log('📍 Final selectedGlobalIds:', selectedGlobalIds);
       return selectedGlobalIds;
     },
-    getElementProps: async (globalId: string) => {
-      // Try to get from cache first if it exists (fast path)
-      const existingCache = idsCacheRef.current;
-      if (existingCache) {
-        const record = existingCache.records.get(globalId);
-        if (record) {
-          return {
-            ifcClass: record.element.ifcClass,
-            psets: record.psets,
-            attributes: record.attributes,
-          };
+    getVisibleGlobalIds: async () => {
+      // Get all visible elements from all models using ThatOpen API
+      console.log('👁️ getVisibleGlobalIds called');
+      
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        console.warn('👁️ Fragments not available');
+        return [];
+      }
+      
+      const visibleGlobalIds: string[] = [];
+      
+      for (const [modelId, model] of fragments.list) {
+        try {
+          console.log(`👁️ Getting visible elements from model: ${modelId}`);
+          
+          // Get local IDs of visible elements
+          const visibleLocalIds = await model.getItemsByVisibility(true);
+          console.log(`👁️ Model ${modelId}: ${visibleLocalIds.length} visible elements`);
+          
+          if (visibleLocalIds.length === 0) continue;
+          
+          // Convert local IDs to GlobalIds
+          // We need to fetch the GlobalId attribute for each visible element
+          const batchSize = 100; // Process in batches to avoid overwhelming the system
+          for (let i = 0; i < visibleLocalIds.length; i += batchSize) {
+            const batch = visibleLocalIds.slice(i, Math.min(i + batchSize, visibleLocalIds.length));
+            
+            try {
+              const itemsData = await model.getItemsData(batch, { 
+                attributesDefault: false,
+                attributes: ['GlobalId']
+              });
+              
+              for (const data of itemsData) {
+                const globalId = findFirstValueByKeywords(data, ['globalid', 'global id', 'guid']);
+                if (globalId && typeof globalId === 'string') {
+                  visibleGlobalIds.push(globalId);
+                }
+              }
+            } catch (error) {
+              console.error(`👁️ Error fetching GlobalIds for batch in model ${modelId}:`, error);
+            }
+          }
+        } catch (error) {
+          console.error(`👁️ Error getting visible elements from model ${modelId}:`, error);
         }
       }
       
-      // If not in cache, we need to build the cache
-      // This is slow but necessary for the current architecture
-      const cache = await ensureIdsCache();
-      const record = cache.records.get(globalId);
-      if (!record) {
-        throw new Error(`Element with GlobalId ${globalId} is not available.`);
+      console.log(`👁️ Total visible GlobalIds: ${visibleGlobalIds.length}`);
+      return visibleGlobalIds;
+    },
+    getElementProps: async (globalId: string) => {
+      console.log('🔍 [getElementProps] START for', globalId);
+      // Truly on-demand: fetch properties directly without cache
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        throw new Error('Fragments not available');
       }
-      return {
-        ifcClass: record.element.ifcClass,
-        psets: record.psets,
-        attributes: record.attributes,
-      };
+      
+      // Find which model contains this GlobalId
+      console.log('🔍 [getElementProps] Searching across', fragments.list.size, 'models');
+      for (const [modelId, model] of fragments.list) {
+        try {
+          // Convert GlobalId to local ID
+          const localIds = await model.getLocalIdsByGuids([globalId]);
+          const localId = localIds[0];
+          
+          if (localId !== null && localId !== undefined) {
+            console.log(`🔍 [getElementProps] Found in model ${modelId}, localId: ${localId}`);
+            
+            // Fetch data on-demand with full relations
+            const [data] = await model.getItemsData([localId], FRAGMENTS_ITEM_DATA_OPTIONS);
+            
+            if (!data) {
+              console.warn(`🔍 [getElementProps] No data returned for localId ${localId}`);
+              continue;
+            }
+            
+            console.log('🔍 [getElementProps] Got data, extracting properties...');
+            
+            // Extract IFC class
+            const ifcClass = extractIfcClassFromData(data);
+            console.log('🔍 [getElementProps] ifcClass:', ifcClass);
+            
+            const psets: Record<string, Record<string, unknown>> = {};
+            const attributes: Record<string, unknown> = {};
+            
+            // Extract property sets
+            const propertyRows = collectIfcPropertySetRows(data);
+            console.log('🔍 [getElementProps] Got', propertyRows.length, 'property rows');
+            
+            propertyRows.forEach((row) => {
+              const labelParts = row.label.split('/').map((part: string) => part.trim());
+              const rawPset = row.rawPsetName ?? labelParts[1] ?? '';
+              const rawProperty = row.rawPropertyName ?? labelParts[labelParts.length - 1] ?? '';
+              const normalizedPset = normalizeIdsToken(rawPset);
+              const normalizedProperty = normalizeIdsToken(rawProperty);
+              if (!normalizedPset || !normalizedProperty) return;
+              if (!psets[normalizedPset]) {
+                psets[normalizedPset] = {};
+              }
+              if (!(normalizedProperty in psets[normalizedPset])) {
+                psets[normalizedPset][normalizedProperty] = row.value;
+              }
+            });
+            
+            // Extract basic attributes
+            attributes.ifcClass = ifcClass;
+            attributes.GlobalId = globalId;
+            const name = readName(data);
+            if (name) attributes.Name = name;
+            const category = findFirstValueByKeywords(data, ['category', 'ifccategory']);
+            if (category) attributes.Category = category;
+            const typeValue = findFirstValueByKeywords(data, ['type', 'typename']);
+            if (typeValue) attributes.Type = typeValue;
+            
+            console.log(`🔍 [getElementProps] SUCCESS: ${Object.keys(psets).length} psets, ${Object.keys(attributes).length} attributes`);
+            return { ifcClass, psets, attributes };
+          }
+        } catch (error) {
+          console.warn(`🔍 [getElementProps] Error in model ${modelId}:`, error);
+          continue;
+        }
+      }
+      
+      // If not found in any model, throw error
+      console.error(`🔍 [getElementProps] Element with GlobalId ${globalId} not found in any model`);
+      throw new Error(`Element with GlobalId ${globalId} is not available.`);
     },
     getElementPropsFast: async (globalId: string) => {
       console.log('🔍 [getElementPropsFast] START for', globalId);
@@ -2828,6 +2931,13 @@ const App: React.FC = () => {
     world.scene = new OBC.SimpleScene(components);
     world.scene.setup();
     world.renderer = new OBC.SimpleRenderer(components, container);
+    
+    // Performance optimizations
+    const threeRenderer = world.renderer.three;
+    threeRenderer.shadowMap.enabled = false; // Disable shadows for better performance
+    // Enable LOD (Level of Detail) for better performance with large models
+    threeRenderer.sortObjects = false; // Faster rendering, less CPU overhead
+    
     world.camera = new OBC.OrthoPerspectiveCamera(components);
     world.camera.controls?.setLookAt(10, 10, 10, 0, 0, 0);
     world.camera.three.near = 0.1;
@@ -4258,43 +4368,48 @@ const App: React.FC = () => {
     setClippingPositions((prev) => {
       const newPositions = { ...prev, [axis]: value };
       
-      // Update the plane and helper
-      const world = worldRef.current;
-      if (!world) return newPositions;
-      
-      const renderer = world.renderer?.three;
-      if (!renderer) return newPositions;
-      
-      const planes: THREE.Plane[] = [];
-      const helpers = clippingHelpersRef.current;
-      
-      if (clippingPlanes.x) {
-        const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), newPositions.x);
-        planes.push(plane);
-        const helper = helpers.get('x');
-        if (helper) {
-          helper.plane.constant = newPositions.x;
+      // Debounce the actual Three.js update for better performance during dragging
+      const updateThreeJS = () => {
+        const world = worldRef.current;
+        if (!world) return;
+        
+        const renderer = world.renderer?.three;
+        if (!renderer) return;
+        
+        const planes: THREE.Plane[] = [];
+        const helpers = clippingHelpersRef.current;
+        
+        if (clippingPlanes.x) {
+          const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), newPositions.x);
+          planes.push(plane);
+          const helper = helpers.get('x');
+          if (helper) {
+            helper.plane.constant = newPositions.x;
+          }
         }
-      }
-      if (clippingPlanes.y) {
-        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), newPositions.y);
-        planes.push(plane);
-        const helper = helpers.get('y');
-        if (helper) {
-          helper.plane.constant = newPositions.y;
+        if (clippingPlanes.y) {
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), newPositions.y);
+          planes.push(plane);
+          const helper = helpers.get('y');
+          if (helper) {
+            helper.plane.constant = newPositions.y;
+          }
         }
-      }
-      if (clippingPlanes.z) {
-        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), newPositions.z);
-        planes.push(plane);
-        const helper = helpers.get('z');
-        if (helper) {
-          helper.plane.constant = newPositions.z;
+        if (clippingPlanes.z) {
+          const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), newPositions.z);
+          planes.push(plane);
+          const helper = helpers.get('z');
+          if (helper) {
+            helper.plane.constant = newPositions.z;
+          }
         }
-      }
+        
+        renderer.clippingPlanes = planes;
+        clippingPlanesRef.current = planes;
+      };
       
-      renderer.clippingPlanes = planes;
-      clippingPlanesRef.current = planes;
+      // Use requestAnimationFrame for smooth updates
+      requestAnimationFrame(updateThreeJS);
       
       return newPositions;
     });

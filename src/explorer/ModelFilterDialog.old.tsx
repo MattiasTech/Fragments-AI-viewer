@@ -596,8 +596,8 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
                 if (!viewerApi) return;
                 if (viewerApi.selectGlobalIds) await Promise.resolve(viewerApi.selectGlobalIds(resultIds));
                 // Set IDS store to selected-only and open panel + run check
-                const { setValidateSelectedOnly, runCheck, setIdsXmlText } = await import('../ids/ids.store').then(m => m.idsStore);
-                setValidateSelectedOnly(true);
+                const { setValidationMode, runCheck, setIdsXmlText } = await import('../ids/ids.store').then(m => m.idsStore);
+                setValidationMode('selected');
                 // Open IDS panel and run check
                 // We cannot directly open the panel here; the caller UI will handle opening. Just run check if viewerApi available
                 await runCheck(viewerApi);

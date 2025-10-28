@@ -63,6 +63,7 @@ export type ItemData = {
 export interface ViewerApi {
   listGlobalIds(): Promise<string[]>;
   getSelectedGlobalIds?(): Promise<string[]>; // Optional: Get only selected elements
+  getVisibleGlobalIds?(): Promise<string[]>; // Optional: Get only visible elements
   getElementProps(globalId: string): Promise<{
     ifcClass: string;
     psets: Record<string, Record<string, unknown>>;

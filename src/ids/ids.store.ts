@@ -27,7 +27,7 @@ interface IdsStoreState {
   filterDescription: string | null;
   error: string | null;
   lastRunAt: number | null;
-  validateSelectedOnly: boolean; // New: toggle for selected elements only
+  validationMode: 'all' | 'visible' | 'selected'; // Validation scope: all elements, visible only, or selected only
 }
 
 const initialState: IdsStoreState = {
@@ -42,11 +42,12 @@ const initialState: IdsStoreState = {
   filterDescription: null,
   error: null,
   lastRunAt: null,
-  validateSelectedOnly: false, // Default to validating all elements
+  validationMode: 'all', // Default to validating all elements
 };
 
 let state = initialState;
 const listeners = new Set<() => void>();
+let currentValidationController: AbortController | null = null; // For cancellation support
 
 const notify = () => {
   listeners.forEach((listener) => {
@@ -173,10 +174,10 @@ const storeApi = {
   clearResults: () => {
     resetResults();
   },
-  setValidateSelectedOnly: (value: boolean) => {
+  setValidationMode: (mode: 'all' | 'visible' | 'selected') => {
     setState((prev) => ({
       ...prev,
-      validateSelectedOnly: value,
+      validationMode: mode,
     }));
   },
   filterRows: (predicate: IdsFilterPredicate | null, description?: string) => {
@@ -226,9 +227,9 @@ const storeApi = {
       return;
     }
 
-    // Check if validating selected elements only
+    // Check validation mode and filter elements accordingly
     let filterGlobalIds: string[] | undefined;
-    if (state.validateSelectedOnly) {
+    if (state.validationMode === 'selected') {
       console.log('🎯 Selected Only mode is active');
       if (viewerApi.getSelectedGlobalIds) {
         console.log('🎯 Getting selected GlobalIds...');
@@ -238,7 +239,7 @@ const storeApi = {
           console.error('❌ No elements selected');
           setState((prev) => ({
             ...prev,
-            error: 'No elements selected. Please select elements or switch to "All Elements" mode.',
+            error: 'No elements selected. Please select elements or switch to another mode.',
           }));
           return;
         }
@@ -248,6 +249,29 @@ const storeApi = {
         setState((prev) => ({
           ...prev,
           error: 'Selected elements validation is not supported by this viewer.',
+        }));
+        return;
+      }
+    } else if (state.validationMode === 'visible') {
+      console.log('👁️ Visible Only mode is active');
+      if (viewerApi.getVisibleGlobalIds) {
+        console.log('👁️ Getting visible GlobalIds...');
+        filterGlobalIds = await viewerApi.getVisibleGlobalIds();
+        console.log('👁️ Visible GlobalIds:', filterGlobalIds);
+        if (!filterGlobalIds || filterGlobalIds.length === 0) {
+          console.error('❌ No visible elements found');
+          setState((prev) => ({
+            ...prev,
+            error: 'No visible elements found. Please make sure elements are visible or switch to another mode.',
+          }));
+          return;
+        }
+        console.log(`👁️ Validating ${filterGlobalIds.length} visible elements`);
+      } else {
+        console.warn('⚠️ getVisibleGlobalIds not available on viewerApi');
+        setState((prev) => ({
+          ...prev,
+          error: 'Visible elements validation is not supported by this viewer.',
         }));
         return;
       }
@@ -261,7 +285,16 @@ const storeApi = {
       progress: null,
     }));
 
+    // Create abort controller for cancellation
+    currentValidationController = new AbortController();
+    const signal = currentValidationController.signal;
+
     try {
+      // Check if cancelled before starting
+      if (signal.aborted) {
+        throw new Error('Validation cancelled');
+      }
+
       const elements = await collectElementsForIds(viewerApi, {
         filterGlobalIds, // Pass the filter if validating selected only
         onPhase: (phase) => {
@@ -280,6 +313,11 @@ const storeApi = {
 
       if (!elements.length) {
         throw new Error('No IFC elements were found in the current viewer.');
+      }
+
+      // Check if cancelled after collection
+      if (signal.aborted) {
+        throw new Error('Validation cancelled');
       }
 
       setState((prev) => ({
@@ -342,6 +380,9 @@ const storeApi = {
         phase: 'DONE',
         progress: null,
       }));
+      
+      // Clear controller on success
+      currentValidationController = null;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to run IDS validation.';
       console.error('IDS run failed', error);
@@ -352,6 +393,9 @@ const storeApi = {
         phase: 'ERROR',
         progress: null,
       }));
+      
+      // Clear controller on error
+      currentValidationController = null;
     }
   },
   invalidateCaches: () => {
@@ -366,6 +410,24 @@ const storeApi = {
       isChecking: false,
       phase: 'IDLE',
       progress: null,
+    }));
+  },
+  cancelValidation: () => {
+    console.log('🛑 Cancelling IDS validation...');
+    if (currentValidationController) {
+      currentValidationController.abort();
+      currentValidationController = null;
+    }
+    if (workerInstance) {
+      // Send cancel message to worker
+      workerInstance.postMessage({ type: 'cancel' });
+    }
+    setState((prev) => ({
+      ...prev,
+      isChecking: false,
+      phase: 'IDLE',
+      progress: null,
+      error: 'Validation cancelled by user',
     }));
   },
 };
@@ -394,8 +456,18 @@ export const useIdsActions = () => {
   const clearResults = useCallback(storeApi.clearResults, []);
   const filterRows = useCallback(storeApi.filterRows, []);
   const runCheck = useCallback(storeApi.runCheck, []);
-  const setValidateSelectedOnly = useCallback(storeApi.setValidateSelectedOnly, []);
-  return { setIdsXmlText, appendDocuments, clearResults, filterRows, runCheck, setValidateSelectedOnly, invalidateCaches: storeApi.invalidateCaches };
+  const setValidationMode = useCallback(storeApi.setValidationMode, []);
+  const cancelValidation = useCallback(storeApi.cancelValidation, []);
+  return { 
+    setIdsXmlText, 
+    appendDocuments, 
+    clearResults, 
+    filterRows, 
+    runCheck, 
+    setValidationMode, 
+    cancelValidation,
+    invalidateCaches: storeApi.invalidateCaches 
+  };
 };
 
 export const idsStore = storeApi;

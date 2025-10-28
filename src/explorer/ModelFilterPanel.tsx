@@ -345,12 +345,27 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
         console.log(`✅ [Filter] Loaded ${itemsData.length} items from model ${modelId}`);
         
         // Filter and collect matching GlobalIds
+        let debugCount = 0;
         for (const item of itemsData) {
           const globalId = extractGlobalId(item);
           if (!globalId) continue;
           
           // Test the filter condition
           const actualValue = getValueByPath(item, field);
+          
+          // Debug first 5 items to see what values we're getting
+          if (debugCount < 5) {
+            console.log(`🔍 [Filter Debug] Item ${debugCount + 1}:`, {
+              globalId,
+              field,
+              actualValue,
+              operator,
+              expectedValue: value,
+              matches: testOperator(actualValue, operator, value)
+            });
+            debugCount++;
+          }
+          
           if (testOperator(actualValue, operator, value)) {
             matchingGlobalIds.push(globalId);
           }

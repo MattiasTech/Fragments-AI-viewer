@@ -496,34 +496,84 @@ const extractGlobalId = (source: unknown): string | null => {
   return nested?.trim() ?? null;
 };
 
+/**
+ * Stream element data collection - yields chunks as they're ready
+ * Useful for progressive validation with large datasets
+ */
+const collectElementsStream = async function* (
+  viewerApi: ViewerApi,
+  globalIds: string[],
+  options?: CollectElementsOptions & { chunkSize?: number }
+): AsyncGenerator<ElementData[]> {
+  const chunkSize = options?.chunkSize ?? 100;
+  const total = Math.max(globalIds.length, 1);
+  const useElementPropsMethod = viewerApi.getElementPropsFast || viewerApi.getElementProps;
+  
+  let processedCount = 0;
+  let currentChunk: ElementData[] = [];
+  
+  for (const globalId of globalIds) {
+    try {
+      const { ifcClass, psets, attributes } = await useElementPropsMethod.call(viewerApi, globalId);
+      
+      const flattened = flattenPsets(psets);
+      if (!('GlobalId' in flattened)) {
+        flattened.GlobalId = globalId;
+      }
+      if (attributes) {
+        for (const [key, value] of Object.entries(attributes)) {
+          const normalized = normalizeToken(key) || key;
+          const path = `Attributes.${normalized}`;
+          if (!(path in flattened)) {
+            flattened[path] = formatValue(value);
+          }
+        }
+      }
+      if (!flattened.ifcClass) {
+        flattened.ifcClass = ifcClass;
+      }
+      
+      currentChunk.push({ GlobalId: globalId, ifcClass, properties: flattened });
+      processedCount++;
+      
+      // Yield chunk when full
+      if (currentChunk.length >= chunkSize) {
+        options?.onProgress?.({ done: processedCount, total });
+        yield currentChunk;
+        currentChunk = [];
+      }
+    } catch (error) {
+      console.warn(`IDS adapter (stream) failed to load element ${globalId}`, error);
+    }
+  }
+  
+  // Yield remaining elements
+  if (currentChunk.length > 0) {
+    options?.onProgress?.({ done: processedCount, total });
+    yield currentChunk;
+  }
+};
+
 const collectElementsDirect = async (
   viewerApi: ViewerApi,
   globalIds: string[],
   options?: CollectElementsOptions
 ): Promise<ElementData[]> => {
   console.log('🔍 [collectElementsDirect] START with', globalIds.length, 'globalIds');
-  console.log('🔍 [collectElementsDirect] Has getElementPropsFast?', !!viewerApi.getElementPropsFast);
+  console.log('🔍 [collectElementsDirect] Has getElementProps?', !!viewerApi.getElementProps);
   
   const elements: ElementData[] = [];
   const total = Math.max(globalIds.length, 1);
   options?.onProgress?.({ done: 0, total });
   
-  // Use fast path if available (for selected-only validation)
-  const useElementPropsMethod = viewerApi.getElementPropsFast || viewerApi.getElementProps;
-  const methodName = viewerApi.getElementPropsFast ? 'getElementPropsFast' : 'getElementProps';
-  console.log('🔍 [collectElementsDirect] Using method:', methodName);
+  // Use getElementProps for each GlobalId (this should already be on-demand if implemented correctly)
+  const useElementPropsMethod = viewerApi.getElementProps;
+  console.log('🔍 [collectElementsDirect] Using getElementProps method');
   
   for (let i = 0; i < globalIds.length; i++) {
     const globalId = globalIds[i];
-    console.log(`🔍 [collectElementsDirect] Processing ${i + 1}/${globalIds.length}: ${globalId}`);
     try {
-      console.log(`🔍 [collectElementsDirect] Calling ${methodName} for ${globalId}...`);
       const { ifcClass, psets, attributes } = await useElementPropsMethod.call(viewerApi, globalId);
-      console.log(`🔍 [collectElementsDirect] Got props for ${globalId}:`, { 
-        ifcClass, 
-        psetCount: Object.keys(psets).length,
-        attrCount: Object.keys(attributes || {}).length 
-      });
       
       const flattened = flattenPsets(psets);
       if (!('GlobalId' in flattened)) {
@@ -542,12 +592,14 @@ const collectElementsDirect = async (
         flattened.ifcClass = ifcClass;
       }
       elements.push({ GlobalId: globalId, ifcClass, properties: flattened });
-      console.log(`🔍 [collectElementsDirect] Added element ${i + 1}, total now: ${elements.length}`);
+      
+      // Update progress periodically
+      if (i % 50 === 0 || i === globalIds.length - 1) {
+        options?.onProgress?.({ done: elements.length, total });
+      }
     } catch (error) {
       console.warn(`IDS adapter (direct) failed to load element ${globalId}`, error);
     }
-    const done = elements.length;
-    options?.onProgress?.({ done, total });
   }
   options?.onProgress?.({ done: elements.length, total });
   console.log('🔍 [collectElementsDirect] COMPLETE - returning', elements.length, 'elements');

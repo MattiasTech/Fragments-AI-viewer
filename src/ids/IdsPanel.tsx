@@ -35,6 +35,7 @@ import OpenInFullIcon from '@mui/icons-material/OpenInFull';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import StopIcon from '@mui/icons-material/Stop';
 import AssessmentIcon from '@mui/icons-material/Assessment';
 import FilterListIcon from '@mui/icons-material/FilterList';
 import HighlightAltIcon from '@mui/icons-material/HighlightAlt';
@@ -112,7 +113,7 @@ const STATUS_LABELS: Record<DetailRow['status'], string> = {
 
 const PHASE_LABELS: Record<Phase, string> = {
   IDLE: 'Idle',
-  BUILDING_PROPERTIES: 'Building properties',
+  BUILDING_PROPERTIES: 'Collecting element data',
   CHECKING_IDS: 'Compiling IDS rules',
   COMPARING_DATA: 'Validating elements',
   FINALIZING: 'Finalizing report',
@@ -272,7 +273,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   const resizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
   const resizingRef = useRef(false);
 
-  const { setIdsXmlText, appendDocuments, clearResults, runCheck, filterRows, setValidateSelectedOnly } = useIdsActions();
+  const { setIdsXmlText, appendDocuments, clearResults, runCheck, filterRows, setValidationMode, cancelValidation } = useIdsActions();
 
   const idsXmlText = useIdsStore((store) => store.idsXmlText);
   const idsFileNames = useIdsStore((store) => store.idsFileNames);
@@ -283,7 +284,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   const rows = useIdsStore((store) => store.rows);
   const filteredRows = useIdsStore((store) => store.filteredRows);
   const error = useIdsStore((store) => store.error);
-  const validateSelectedOnly = useIdsStore((store) => store.validateSelectedOnly);
+  const validationMode = useIdsStore((store) => store.validationMode);
 
   const [activeTab, setActiveTab] = useState<'summary' | 'details'>('summary');
   const [detailSearch, setDetailSearch] = useState('');
@@ -340,16 +341,21 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     progressVariant = 'determinate';
     progressValue = Math.max(0, Math.min((clampedDone / progress.total) * 100, 100));
     
-    // Enhanced progress caption showing parallel processing
+    // Enhanced progress caption showing different messages per phase
     if (phase === 'BUILDING_PROPERTIES') {
       const percent = Math.round(progressValue);
-      progressCaption = `Processing with ${workerCount} parallel workers: ${percent}% (${clampedDone.toLocaleString()} / ${progress.total.toLocaleString()} elements)`;
+      progressCaption = `Collecting element data: ${percent}% (${clampedDone.toLocaleString()} / ${progress.total.toLocaleString()} elements)`;
+    } else if (phase === 'COMPARING_DATA') {
+      const percent = Math.round(progressValue);
+      progressCaption = `Validating: ${percent}% (${clampedDone.toLocaleString()} / ${progress.total.toLocaleString()} elements)`;
     } else {
       progressCaption = `${clampedDone.toLocaleString()} / ${progress.total.toLocaleString()}`;
     }
   } else if (isChecking) {
     if (phase === 'BUILDING_PROPERTIES') {
-      progressCaption = `Initializing ${workerCount} parallel workers…`;
+      progressCaption = 'Starting element data collection…';
+    } else if (phase === 'COMPARING_DATA') {
+      progressCaption = 'Validating elements…';
     } else {
       progressCaption = 'Working…';
     }
@@ -391,9 +397,9 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
 
   const handleValidationModeChange = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
-      setValidateSelectedOnly(event.target.value === 'selected');
+      setValidationMode(event.target.value as 'all' | 'visible' | 'selected');
     },
-    [setValidateSelectedOnly]
+    [setValidationMode]
   );
 
   const handleRunCheck = useCallback(async () => {
@@ -771,22 +777,35 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
                   />
                   <Box sx={{ flex: 1 }} />
                   <FormControl component="fieldset" size="small">
-                    <RadioGroup row value={validateSelectedOnly ? 'selected' : 'all'} onChange={handleValidationModeChange}>
+                    <RadioGroup row value={validationMode} onChange={handleValidationModeChange}>
                       <FormControlLabel value="all" control={<Radio size="small" />} label="All Elements" />
+                      <FormControlLabel value="visible" control={<Radio size="small" />} label="Visible Only" />
                       <FormControlLabel value="selected" control={<Radio size="small" />} label="Selected Only" />
                     </RadioGroup>
                   </FormControl>
                   <Tooltip title="Validate the loaded model against IDS requirements" slotProps={tooltipSlotProps}>
                     <span>
-                      <Button
-                        variant="contained"
-                        size="small"
-                        startIcon={isChecking ? <CircularProgress size={16} color="inherit" /> : <PlayArrowIcon />}
-                        disabled={!hasIdsContent || !viewerApi || !hasModel || isChecking}
-                        onClick={handleRunCheck}
-                      >
-                        {isChecking ? 'Checking…' : 'Run Check'}
-                      </Button>
+                      {isChecking ? (
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          color="error"
+                          startIcon={<StopIcon />}
+                          onClick={cancelValidation}
+                        >
+                          Cancel
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="contained"
+                          size="small"
+                          startIcon={<PlayArrowIcon />}
+                          disabled={!hasIdsContent || !viewerApi || !hasModel}
+                          onClick={handleRunCheck}
+                        >
+                          Run Check
+                        </Button>
+                      )}
                     </span>
                   </Tooltip>
                 </Box>
