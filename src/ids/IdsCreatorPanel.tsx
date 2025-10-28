@@ -109,6 +109,70 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
     }
   }, [selectedItemJson]);
 
+  // Build property rows from selected item data - ONLY PSETS
+  const selectedItemProperties = useMemo(() => {
+    if (!selectedItemSnapshot) return [];
+    
+    const rows: { label: string; value: string; psetName: string }[] = [];
+    
+    // Helper to format values
+    const formatValue = (val: any): string => {
+      if (val == null) return '—';
+      if (typeof val === 'object') {
+        if ('value' in val) return formatValue(val.value);
+        if ('Value' in val) return formatValue(val.Value);
+        if (val instanceof Date) return val.toLocaleString();
+        if (Array.isArray(val)) return `[${val.length} items]`;
+        return '[Object]';
+      }
+      return String(val);
+    };
+    
+    // Extract property sets from IsDefinedBy array
+    const isDefinedBy = selectedItemSnapshot.IsDefinedBy || selectedItemSnapshot.isDefinedBy;
+    if (Array.isArray(isDefinedBy)) {
+      isDefinedBy.forEach((pset: any) => {
+        if (!pset || typeof pset !== 'object') return;
+        
+        // Try multiple ways to get pset name
+        const psetName = pset.Name?.value || pset.name?.value || pset.Name || pset.name || pset.type;
+        if (!psetName || typeof psetName !== 'string') return;
+        
+        // Try to get properties from multiple possible locations
+        const hasProps = pset.HasProperties || pset.hasProperties || pset.properties || pset.Properties;
+        if (!Array.isArray(hasProps)) return;
+        
+        hasProps.forEach((prop: any) => {
+          if (!prop || typeof prop !== 'object') return;
+          
+          // Try multiple ways to get property name
+          const propName = prop.Name?.value || prop.name?.value || prop.Name || prop.name;
+          if (!propName || typeof propName !== 'string') return;
+          
+          // Try multiple ways to get property value
+          const nominalValue = 
+            prop.NominalValue?.value || 
+            prop.nominalValue?.value || 
+            prop.NominalValue || 
+            prop.nominalValue ||
+            prop.value ||
+            prop.Value;
+          
+          const label = `${psetName} / ${propName}`;
+          rows.push({ label, value: formatValue(nominalValue), psetName });
+        });
+      });
+    }
+    
+    // Sort by pset name, then by property name for better readability
+    rows.sort((a, b) => {
+      if (a.psetName !== b.psetName) return a.psetName.localeCompare(b.psetName);
+      return a.label.localeCompare(b.label);
+    });
+    
+    return rows;
+  }, [selectedItemSnapshot]);
+
   // Helper: recursively extract candidate property sets and property names from a sample object
   const extractPropertySetsFromSample = useCallback((sample: any): Record<string, string[]> => {
     const result: Record<string, Set<string>> = {};
@@ -488,7 +552,7 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
             justifyContent: 'space-between',
             px: 2,
             py: 1,
-            backgroundColor: 'secondary.main',
+            backgroundColor: 'primary.main',
             color: 'white',
             cursor: 'move',
             gap: 2,
@@ -723,22 +787,42 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
             </Box>
 
             {/* Panel 3: Model Inspector */}
-            <Box sx={{ width: 300, borderLeft: '1px solid', borderColor: 'divider', p: 1, overflowY: 'auto' }}>
-              <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                Model Inspector
-              </Typography>
-              {selectedItemJson ? (
-                <pre style={{ fontSize: '0.75rem', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                  {selectedItemJson}
-                </pre>
+            <Box sx={{ width: 300, borderLeft: '1px solid', borderColor: 'divider', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
+                <Typography variant="subtitle2">
+                  Property Sets
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {selectedItemProperties.length > 0 ? `${selectedItemProperties.length} properties` : 'Select an element'}
+                </Typography>
+              </Box>
+              {selectedItemProperties.length > 0 ? (
+                <Box sx={{ flex: 1, overflowY: 'auto', p: 1 }}>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                    {selectedItemProperties.map((prop, index) => (
+                      <Box key={index} sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+                        <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.secondary' }}>
+                          {prop.label}
+                        </Typography>
+                        <Typography variant="body2" sx={{ wordBreak: 'break-word' }}>
+                          {prop.value}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Box>
+                </Box>
               ) : selectedItemData ? (
-                <Typography variant="body2" color="text.secondary">
-                  Unable to display selected element properties.
-                </Typography>
+                <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', p: 2 }}>
+                  <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center' }}>
+                    No property sets found for this element.
+                  </Typography>
+                </Box>
               ) : (
-                <Typography variant="body2" color="text.secondary">
-                  Select an element in the viewer to inspect its properties.
-                </Typography>
+                <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', p: 2 }}>
+                  <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center' }}>
+                    Select an element in the viewer to inspect its property sets.
+                  </Typography>
+                </Box>
               )}
             </Box>
           </Box>
