@@ -77,6 +77,7 @@ export interface ViewerApi {
   addToCache?(globalIds: string[]): Promise<void>; // Add elements to cache incrementally
   selectGlobalIds?(globalIds: string[]): Promise<void> | void; // Select elements in the viewer by GlobalId
   isolate(globalIds: string[]): Promise<void> | void;
+  ghost?(globalIds: string[]): Promise<void> | void; // Make non-matching elements transparent
   color(globalIds: string[], rgba: RgbaColor): Promise<void> | void;
   clearColors(): Promise<void> | void;
   fitViewTo(globalIds: string[]): Promise<void> | void;

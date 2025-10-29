@@ -67,7 +67,7 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
   const [field, setField] = useState(DEFAULT_FIELD);
   const [operator, setOperator] = useState<RequirementOperator>('equals');
   const [value, setValue] = useState('');
-  const [filterMode, setFilterMode] = useState<'isolate' | 'color' | 'both'>('isolate');
+  const [filterMode, setFilterMode] = useState<'ghost' | 'isolate'>('ghost');
   
   // Property Discovery
   const [availableIfcTypes] = useState(DEFAULT_IFC_TYPES);
@@ -396,42 +396,49 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
     }
   }, [viewerApi, field, operator, value, selectedIfcTypes]);
   
-  // Apply filter to view (ghost mode)
+  // Apply filter to view (ghost or isolate mode)
   useEffect(() => {
     let mounted = true;
     const applyToView = async () => {
       if (!viewerApi || !resultIds || resultIds.length === 0 || filtering) return;
       
       try {
-        console.log('🎨 [Filter] Applying visualization...');
+        console.log(`[Filter] Applying ${filterMode} mode...`);
         
-        // Clear previous colors
+        // Clear previous colors and isolation
         if (viewerApi.clearColors) {
           await viewerApi.clearColors();
         }
+        if (viewerApi.clearIsolation) {
+          await viewerApi.clearIsolation();
+        }
         
-        // For isolate mode, hide non-matching elements
-        if (filterMode === 'isolate' || filterMode === 'both') {
+        // Apply the selected mode
+        if (filterMode === 'ghost') {
+          // Ghost mode: make non-matching elements transparent
+          if (viewerApi.ghost) {
+            await viewerApi.ghost(resultIds);
+            console.log('[Filter] Applied ghost mode');
+          } else {
+            console.warn('Ghost mode not supported by viewer API');
+          }
+        } else {
+          // Isolate mode: hide non-matching elements
           await viewerApi.isolate(resultIds);
-          console.log('👻 [Filter] Applied isolate mode');
+          console.log('[Filter] Applied isolate mode');
         }
         
-        // Optionally color matching elements
-        if (filterMode === 'color' || filterMode === 'both') {
-          await viewerApi.color(resultIds, { r: 1, g: 0.65, b: 0.25, a: 1 }); // Orange
-          console.log('🎨 [Filter] Applied color to matches');
-        }
-        
+        // Fit view to matching elements
         if (typeof viewerApi.fitViewTo === 'function') {
           await viewerApi.fitViewTo(resultIds);
-          console.log('📷 [Filter] Fitted view to matches');
+          console.log('[Filter] Fitted view to filtered elements');
         }
         
         if (mounted) {
           setFilterActive(true);
         }
       } catch (error) {
-        console.error('❌ [Filter] Failed to apply filter to view:', error);
+        console.error('[Filter] Failed to apply filter to view:', error);
       }
     };
     
@@ -640,30 +647,39 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
                   placeholder="Enter value..."
                 />
               </Box>
+              
+              {/* Filter Mode Toggle */}
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="caption" color="text.secondary" gutterBottom sx={{ display: 'block' }}>
+                  Filter Mode:
+                </Typography>
+                <ToggleButtonGroup
+                  value={filterMode}
+                  exclusive
+                  onChange={(_, newMode) => {
+                    if (newMode !== null) {
+                      setFilterMode(newMode);
+                    }
+                  }}
+                  size="small"
+                  fullWidth
+                >
+                  <ToggleButton value="ghost">
+                    Ghost (Transparent)
+                  </ToggleButton>
+                  <ToggleButton value="isolate">
+                    Isolate (Hide)
+                  </ToggleButton>
+                </ToggleButtonGroup>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                  {filterMode === 'ghost' 
+                    ? 'Makes non-matching elements transparent' 
+                    : 'Hides non-matching elements completely'}
+                </Typography>
+              </Box>
             </Box>
             
             <Divider sx={{ my: 2 }} />
-            
-            {/* Filter Mode */}
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="subtitle2" gutterBottom>
-                3. Filter Mode
-              </Typography>
-              <ToggleButtonGroup
-                size="small"
-                value={filterMode}
-                exclusive
-                onChange={(_, newMode) => newMode && setFilterMode(newMode)}
-                fullWidth
-              >
-                <ToggleButton value="isolate">GHOST</ToggleButton>
-                <ToggleButton value="color">COLOR</ToggleButton>
-                <ToggleButton value="both">BOTH</ToggleButton>
-              </ToggleButtonGroup>
-              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
-                Ghost: Hide non-matching | Color: Highlight matches | Both: Combine
-              </Typography>
-            </Box>
             
             {/* Progress */}
             {filtering && filterProgress && (

@@ -8,19 +8,6 @@ body,
   overflow: hidden; /* prevent page scrollbar */
 }
 
-/* Overlay cube in upper-left like the screenshot */
-.nav-cube {
-  position: fixed;
-  left: 8px;
-  top: 130px; /* below AppBar and stats panel */
-  width: 110px;
-  height: 110px;
-  pointer-events: auto;
-  z-index: 1001;
-  border-radius: 8px;
-  background: transparent;
-}
-
 /* Right docked panel similar to That Open UI card */
 .right-panel {
   position: fixed;

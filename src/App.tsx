@@ -1215,13 +1215,12 @@ const App: React.FC = () => {
   const [componentsReady, setComponentsReady] = useState(false);
   const ifcAbortRef = useRef<AbortController | null>(null);
   const ifcCancelledRef = useRef<boolean>(false);
-  const navCubeRef = useRef<HTMLCanvasElement | null>(null);
-  const navCubeState = useRef<{ scene: THREE.Scene; camera: THREE.PerspectiveCamera; renderer: THREE.WebGLRenderer; cube: THREE.Mesh } | null>(null);
   const selectionMarkerRef = useRef<THREE.Group | null>(null);
   const prevInstanceHighlightRef = useRef<{ mesh: THREE.InstancedMesh; index: number } | null>(null);
   const aiSelectionSeqRef = useRef(0);
   const highlighterRef = useRef<any>(null);
   const idsOriginalColorsRef = useRef<Map<string, { material: any; color: THREE.Color | null }> | null>(null);
+  const ghostOriginalMaterialsRef = useRef<Map<any, { color: number | undefined; transparent: boolean; opacity: number }> | null>(null);
   const [explorerSize, setExplorerSize] = useState({ width: 360, height: 520 });
   const explorerResizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
   const explorerResizingRef = useRef(false);
@@ -2623,12 +2622,46 @@ const App: React.FC = () => {
     },
     clearColors: async () => {
       const highlighter = highlighterRef.current;
+      const fragments = fragmentsRef.current;
       
       if (!fragmentsReadyRef.current) return;
+      
+      // Restore original material properties (clear ghost effect)
+      if (fragments && ghostOriginalMaterialsRef.current && ghostOriginalMaterialsRef.current.size > 0) {
+        try {
+          for (const [material, originalProps] of ghostOriginalMaterialsRef.current) {
+            const { color, transparent, opacity } = originalProps;
+            material.transparent = transparent;
+            material.opacity = opacity;
+            if (color !== undefined) {
+              if ('color' in material) {
+                material.color.setHex(color);
+              } else if ('lodColor' in material) {
+                material.lodColor.setHex(color);
+              }
+            }
+            material.needsUpdate = true;
+          }
+          ghostOriginalMaterialsRef.current.clear();
+          console.log('Restored original material properties');
+        } catch (error) {
+          console.warn('Failed to restore original materials', error);
+        }
+      }
       
       // Clear using highlighter - this will remove all highlights
       try {
         if (highlighter) {
+          // Clear any ghost styles first
+          if (highlighter.styles && typeof highlighter.styles.delete === 'function') {
+            try {
+              highlighter.styles.delete('ghost');
+              console.log('Cleared ghost styles');
+            } catch (error) {
+              console.warn('Failed to clear ghost styles', error);
+            }
+          }
+          
           // Try the new clear API first
           if (typeof highlighter.clear === 'function') {
             await Promise.resolve(highlighter.clear());
@@ -2715,6 +2748,121 @@ const App: React.FC = () => {
       const hider = hiderRef.current;
       if (!hider) return;
       await Promise.resolve(hider.set(true));
+    },
+    ghost: async (globalIds) => {
+      // Ghost mode: make non-matching elements semi-transparent using ThatOpen API
+      const fragments = fragmentsRef.current;
+      if (!fragments || !fragmentsReadyRef.current) return;
+      
+      if (!globalIds.length) return;
+      
+      // Save original material properties if not already saved
+      if (!ghostOriginalMaterialsRef.current) {
+        ghostOriginalMaterialsRef.current = new Map();
+      }
+      
+      // Get matching local IDs first
+      const { grouped } = await groupLocalIdsByModel(globalIds);
+      
+      if (grouped.size === 0) {
+        console.warn('ghost: No matching elements found');
+        return;
+      }
+      
+      console.log(`🔍 [ghost] Processing ${grouped.size} models with ${Array.from(grouped.values()).reduce((sum, arr) => sum + arr.length, 0)} matching elements`);
+      
+      // Simple approach: Make ALL elements transparent, then use highlighter to make matching ones opaque
+      // This way we don't need to figure out which materials belong to which elements
+      
+      console.log(`🔍 [ghost] Step 1: Making all materials semi-transparent`);
+      
+      // Get all materials
+      const allMaterials = [...(fragments as any).core.models.materials.list.values()];
+      console.log(`🔍 [ghost] Found ${allMaterials.length} total materials`);
+      
+      let ghostedCount = 0;
+      
+      // First pass: Make ALL materials semi-transparent (ghost everything)
+      for (const material of allMaterials) {
+        if (material.userData?.customId) continue; // Skip custom materials
+        
+        // Save original properties if not already saved
+        if (!ghostOriginalMaterialsRef.current.has(material)) {
+          let color: number | undefined;
+          if ('color' in material) {
+            color = material.color.getHex();
+          } else if ('lodColor' in material) {
+            color = material.lodColor.getHex();
+          }
+          
+          ghostOriginalMaterialsRef.current.set(material, {
+            color,
+            transparent: material.transparent,
+            opacity: material.opacity,
+          });
+        }
+        
+        // Ghost ALL materials
+        material.transparent = true;
+        material.opacity = 0.15;
+        material.needsUpdate = true;
+        ghostedCount++;
+      }
+      
+      console.log(`👻 [ghost] Step 2: Ghosted ${ghostedCount} materials`);
+      
+      // Second pass: Restore opacity for matching elements by using highlighter
+      // The highlighter.add() method will override the material properties we just set
+      const highlighter = highlighterRef.current;
+      const world = worldRef.current;
+      
+      if (highlighter && world) {
+        try {
+          console.log(`🔍 [ghost] Step 3: Restoring opacity for matching elements using highlighter.add()`);
+          
+          // For each model, use highlighter.add to restore the matching elements
+          for (const [modelId, localIds] of grouped.entries()) {
+            const model = fragments.list.get(modelId);
+            if (!model || !localIds.length) continue;
+            
+            const ids = Array.from(localIds);
+            console.log(`🔍 [ghost] Restoring ${ids.length} elements in model ${modelId}`);
+            
+            // Use highlighter.add with a fully opaque "color" (we'll restore the actual color)
+            // The color doesn't matter much - we just need to override the transparency
+            if (typeof highlighter.add === 'function') {
+              try {
+                // Use a neutral color (white = 0xffffff) with full opacity
+                // This will override the ghosted material settings
+                highlighter.add(model, ids, 0xffffff);
+                console.log(`✅ [ghost] Restored ${ids.length} elements using highlighter.add()`);
+              } catch (error) {
+                console.error(`Failed to restore elements in model ${modelId}:`, error);
+              }
+            } else {
+              console.warn('highlighter.add() not available');
+            }
+          }
+          
+          // Force a render update
+          if (typeof world.update === 'function') {
+            try {
+              world.update();
+              console.log('🔍 [ghost] Forced world update');
+            } catch (updateError) {
+              console.debug('World update failed:', updateError);
+            }
+          }
+          
+          console.log(`✅ [ghost] Matched elements restored to full opacity`);
+        } catch (error) {
+          console.error('ghost: Failed to restore matching elements', error);
+        }
+      } else {
+        console.warn('ghost: Highlighter or world not available, matching elements will also be ghosted');
+      }
+      
+      console.log(`👻 [ghost] Complete: ghosted all materials, restored ${Array.from(grouped.values()).reduce((sum, arr) => sum + arr.length, 0)} matching elements`);
     },
     // On-demand property loading (ThatOpen pattern)
     getItemsData: async (globalIds: string[], config?: any) => {
@@ -2943,6 +3091,24 @@ const App: React.FC = () => {
     world.camera.three.near = 0.1;
     world.camera.three.far = 1e9;
     world.camera.three.updateProjectionMatrix();
+    
+    // Configure camera controls: middle mouse button for pan, wheel scroll for zoom
+    const cameraControls = world.camera.controls;
+    if (cameraControls) {
+      // Camera-controls library uses mouseButtons property to configure interactions
+      if ('mouseButtons' in cameraControls) {
+        (cameraControls as any).mouseButtons = {
+          left: 1,    // ROTATE (orbit) - left mouse button
+          middle: 2,  // TRUCK (pan) - middle mouse button (wheel click)
+          right: 0,   // NONE - disable right click drag (we use it for context menu)
+          wheel: 16,   // DOLLY (zoom) - mouse wheel scroll (default zoom behavior)
+        };
+      }
+      // Adjust zoom speed for better control
+      if ('dollySpeed' in cameraControls) {
+        (cameraControls as any).dollySpeed = 1.0;
+      }
+    }
 
     const ambient = new THREE.AmbientLight(0xffffff, 1.0);
     world.scene.three.add(ambient);
@@ -3141,83 +3307,6 @@ const App: React.FC = () => {
     init().catch((error) => {
       console.error('Failed to initialize viewer fragments', error);
     });
-
-    const navCanvas = document.createElement('canvas');
-    navCanvas.width = 110;
-    navCanvas.height = 110;
-    navCanvas.className = 'nav-cube';
-    container.appendChild(navCanvas);
-    navCubeRef.current = navCanvas;
-
-    const nScene = new THREE.Scene();
-    const nCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
-    nCamera.position.set(0, 0, 5);
-    const nRenderer = new THREE.WebGLRenderer({ canvas: navCanvas, alpha: true, antialias: true });
-    nRenderer.setPixelRatio(window.devicePixelRatio);
-    nRenderer.setSize(110, 110);
-    const cubeGeom = new THREE.BoxGeometry(1.4, 1.4, 1.4);
-    const cube = new THREE.Mesh(cubeGeom, new THREE.MeshNormalMaterial({ flatShading: true }));
-    nScene.add(cube);
-    const dl = new THREE.DirectionalLight(0xffffff, 0.8);
-    dl.position.set(5, 10, 7);
-    nScene.add(dl);
-    navCubeState.current = { scene: nScene, camera: nCamera, renderer: nRenderer, cube };
-
-    world.renderer.onAfterUpdate.add(() => {
-      const st = navCubeState.current;
-      if (!st) return;
-      const threeCamera = getThreeCamera();
-      if (!threeCamera) return;
-      st.cube.quaternion.copy(threeCamera.quaternion);
-      st.renderer.render(st.scene, st.camera);
-    });
-
-    const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2();
-    const onNavClick = async (ev: MouseEvent) => {
-      const st = navCubeState.current;
-      if (!st) return;
-      const rect = navCanvas.getBoundingClientRect();
-      mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(mouse, st.camera);
-      const hit = raycaster.intersectObject(st.cube, true)[0];
-      if (!hit || !hit.face) return;
-      const normal = hit.face.normal.clone().transformDirection(st.cube.matrixWorld);
-      const target = new THREE.Vector3();
-      const fragments = fragmentsRef.current;
-  const camera = getWorldCamera();
-      const controls = camera?.controls ?? null;
-      const threeCamera = camera?.three ?? null;
-      if (!controls && !threeCamera) {
-        console.warn('Navigation cube interaction skipped: viewer camera not ready.');
-        return;
-      }
-      if (fragments && fragments.list.size) {
-        const full = new THREE.Box3();
-        for (const model of fragments.list.values()) full.expandByObject(model.object);
-        full.getCenter(target);
-        const sphere = new THREE.Sphere();
-        full.getBoundingSphere(sphere);
-        const dist = Math.max(3, sphere.radius * 3);
-        const eye = target.clone().add(normal.multiplyScalar(dist));
-        if (controls) {
-          await controls.setLookAt(eye.x, eye.y, eye.z, target.x, target.y, target.z, true);
-        } else if (threeCamera) {
-          threeCamera.position.set(eye.x, eye.y, eye.z);
-          threeCamera.lookAt(target);
-        }
-        return;
-      }
-      const eye = normal.clone().multiplyScalar(10);
-      if (controls) {
-        await controls.setLookAt(eye.x, eye.y, eye.z, 0, 0, 0, true);
-      } else if (threeCamera) {
-        threeCamera.position.set(eye.x, eye.y, eye.z);
-        threeCamera.lookAt(0, 0, 0);
-      }
-    };
-    navCanvas.addEventListener('click', onNavClick);
 
     return () => {
       disposed = true;
@@ -4078,6 +4167,10 @@ const App: React.FC = () => {
     const dom = world.renderer?.three.domElement as HTMLCanvasElement | undefined;
     if (!dom) return;
     const mouse = new THREE.Vector2();
+    
+    // Debounce to improve responsiveness - prevent multiple rapid picks
+    let pickTimeout: ReturnType<typeof setTimeout> | null = null;
+    
     const pickAt = async (clientX: number, clientY: number) => {
       const fr = fragmentsRef.current; if (!fr) return;
       const threeCamera = getThreeCamera();
@@ -4091,6 +4184,8 @@ const App: React.FC = () => {
       let best: { dist: number; model: any; localId: number; point?: THREE.Vector3; object?: any; instanceId?: number } | null = null;
       const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, threeCamera);
+    
+    // Use Open Company's built-in raycasting for better performance
     for (const model of fr.list.values()) {
         const hit = await model.raycast({ camera: threeCamera, mouse, dom: world.renderer!.three.domElement! });
         if (hit && typeof hit.distance === 'number') {
@@ -4108,48 +4203,47 @@ const App: React.FC = () => {
         }
       }
       if (!best) return;
-      // Prefer native Highlighter if present; otherwise color the picked instance
-      let usedNativeHighlight = false;
-      try {
-        const hl = highlighterRef.current;
-        if (hl) {
-          try { hl.clear?.(); } catch {}
-          // Try common method names across versions
-          const colorHex = 0x66ccff;
-          if (typeof hl.highlightById === 'function') {
-            await hl.highlightById(best.model, [best.localId], colorHex);
-            usedNativeHighlight = true;
-          } else if (typeof hl.highlightByID === 'function') {
-            await hl.highlightByID(best.model, [best.localId], colorHex);
-            usedNativeHighlight = true;
-          } else if (typeof hl.add === 'function') {
-            hl.add(best.model, [best.localId], colorHex);
-            usedNativeHighlight = true;
-          } else if (typeof hl.select === 'function' && best.object) {
-            hl.select(best.object, best.instanceId);
-            usedNativeHighlight = true;
-          }
-        }
-      } catch { /* ignore and fallback */ }
-
-      if (!usedNativeHighlight) {
-        // Try to color the selected instance (light blue) if the hit is an InstancedMesh
+      
+      // Always use Open Company's Highlighter API for consistent, performant highlighting
+      const hl = highlighterRef.current;
+      if (hl) {
         try {
-          const obj: any = best.object;
-          const idx: any = best.instanceId;
-          if (obj && obj.isInstancedMesh && Number.isInteger(idx)) {
-            // reset previous highlight
-            const prev = prevInstanceHighlightRef.current;
-            if (prev && prev.mesh && prev.mesh.instanceColor) {
-              const white = new THREE.Color(1, 1, 1);
-              try { prev.mesh.setColorAt(prev.index, white); prev.mesh.instanceColor.needsUpdate = true; } catch {}
-            }
-            const inst = obj as THREE.InstancedMesh;
-            const color = new THREE.Color(0x66ccff);
-            try { inst.setColorAt(idx as number, color); inst.instanceColor!.needsUpdate = true; } catch {}
-            prevInstanceHighlightRef.current = { mesh: inst, index: idx as number };
+          // Clear previous highlight
+          if (typeof hl.clear === 'function') {
+            hl.clear();
           }
-        } catch { /* non-fatal */ }
+          
+          // Apply new highlight using the most compatible method
+          const colorHex = 0x66ccff;
+          if (typeof hl.highlightByID === 'function') {
+            // Newer API
+            await hl.highlightByID(best.model.uuid, [best.localId], colorHex);
+          } else if (typeof hl.add === 'function') {
+            // Alternative API
+            hl.add(best.model.uuid, [best.localId]);
+          } else if (typeof hl.highlight === 'function') {
+            // Fallback API
+            await hl.highlight(best.model, [best.localId], colorHex);
+          }
+        } catch (err) {
+          console.warn('Highlighter failed, using fallback:', err);
+          // Fallback: manual instance coloring
+          try {
+            const obj: any = best.object;
+            const idx: any = best.instanceId;
+            if (obj && obj.isInstancedMesh && Number.isInteger(idx)) {
+              const prev = prevInstanceHighlightRef.current;
+              if (prev && prev.mesh && prev.mesh.instanceColor) {
+                const white = new THREE.Color(1, 1, 1);
+                try { prev.mesh.setColorAt(prev.index, white); prev.mesh.instanceColor.needsUpdate = true; } catch {}
+              }
+              const inst = obj as THREE.InstancedMesh;
+              const color = new THREE.Color(0x66ccff);
+              try { inst.setColorAt(idx as number, color); inst.instanceColor!.needsUpdate = true; } catch {}
+              prevInstanceHighlightRef.current = { mesh: inst, index: idx as number };
+            }
+          } catch { /* non-fatal */ }
+        }
       }
       // Place/update selection marker
       try {
@@ -4204,9 +4298,21 @@ const App: React.FC = () => {
         } catch {}
       }
     };
+    
+    // Debounced pick handler for better responsiveness
+    const debouncedPickAt = (clientX: number, clientY: number) => {
+      if (pickTimeout) {
+        clearTimeout(pickTimeout);
+      }
+      pickTimeout = setTimeout(() => {
+        pickAt(clientX, clientY);
+      }, 50); // 50ms debounce - responsive but not excessive
+    };
+    
     const onPointerDown = async (ev: PointerEvent) => {
       setContextMenu(null);
       if (ev.button !== 0) return; // left button only
+      // Use immediate pick on click for responsiveness
       await pickAt(ev.clientX, ev.clientY);
     };
     const onClick = async (ev: MouseEvent) => {
@@ -4256,6 +4362,11 @@ const App: React.FC = () => {
     window.addEventListener('keydown', onKeyDown);
     
     return () => {
+      // Clear debounce timeout
+      if (pickTimeout) {
+        clearTimeout(pickTimeout);
+      }
+      
       dom.removeEventListener('pointerdown', onPointerDown, { capture: true } as AddEventListenerOptions);
       dom.removeEventListener('click', onClick);
       dom.removeEventListener('dblclick', onDoubleClick);
@@ -4752,19 +4863,6 @@ const App: React.FC = () => {
                 >
                   {isExplorerMinimized ? <OpenInFullIcon /> : <MinimizeIcon />}
                 </IconButton>
-                  <Tooltip title="Open parametric filter">
-                    <span>
-                      <IconButton
-                        size="small"
-                        color="inherit"
-                        onClick={() => setIsFilterDialogOpen(true)}
-                        title="Parametric Filter"
-                        sx={{ mr: 0.5 }}
-                      >
-                        <FilterListIcon />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
                   <IconButton 
                   size="small" 
                   color="inherit" 
@@ -4782,6 +4880,19 @@ const App: React.FC = () => {
                   <Button variant="contained" size="small" onClick={() => fileInputRef.current?.click()} disabled={!componentsReady}>
                     Open IFC / FRAG
                   </Button>
+                  <Tooltip title="Open parametric filter">
+                    <span>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => setIsFilterDialogOpen(true)}
+                        disabled={!componentsReady}
+                        startIcon={<FilterListIcon />}
+                      >
+                        Filter
+                      </Button>
+                    </span>
+                  </Tooltip>
                     {import.meta.env.DEV && (
                       <Tooltip title="Dump raw .frag JSON (dev only)">
                         <span>
@@ -4830,23 +4941,6 @@ const App: React.FC = () => {
                       {isModelsSectionCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
                     </IconButton>
                   </Box>
-                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                      <Tooltip title={componentsReady ? 'Open parametric model filter' : 'Viewer loading — model tools not ready yet'}>
-                        <span>
-                          <Button
-                            size="small"
-                            variant="contained"
-                            color="primary"
-                            onClick={() => setIsFilterDialogOpen(true)}
-                            startIcon={<FilterListIcon />}
-                            disabled={false}
-                            sx={{ minWidth: 140 }}
-                          >
-                            Parametric Filter
-                          </Button>
-                        </span>
-                      </Tooltip>
-                    </Box>
                   <Collapse
                     in={!isModelsSectionCollapsed}
                     timeout="auto"

@@ -113,7 +113,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
       return value;
     }
     
-    // Property set path (e.g., "NV_PSteel.NV_STATUS")
     // Following ThatOpen example: IsDefinedBy is an array at item level
     const [psetName, propName] = parts;
     
@@ -443,11 +442,7 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
       <DialogTitle>Parametric Filter (On-Demand)</DialogTitle>
       <DialogContent>
-        {/* Info Alert */}
-        <Alert severity="info" sx={{ mb: 2 }}>
-          <strong>On-Demand Mode:</strong> Properties are loaded only when filtering. No pre-extraction needed!
-        </Alert>
-        
+            
         {/* Category Filter Section */}
         <Box sx={{ mb: 3, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
           <Typography variant="subtitle2" gutterBottom>
