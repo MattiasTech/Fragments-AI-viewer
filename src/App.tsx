@@ -2750,43 +2750,38 @@ const App: React.FC = () => {
       await Promise.resolve(hider.set(true));
     },
     ghost: async (globalIds) => {
-      // Ghost mode: make non-matching elements semi-transparent using ThatOpen API
+      // Ghost mode: Since transparency doesn't work and highlighter.add() is deprecated,
+      // we'll just color the matching elements using the color API
+      console.log(`[ghost] Applying ghost mode by coloring ${globalIds.length} matching elements`);
+      
       const fragments = fragmentsRef.current;
-      if (!fragments || !fragmentsReadyRef.current) return;
+      const world = worldRef.current;
+      if (!fragments || !fragmentsReadyRef.current || !world) {
+        console.warn('[ghost] Fragments or world not ready');
+        return;
+      }
       
-      if (!globalIds.length) return;
+      // Group by model
+      const { grouped } = await groupLocalIdsByModel(globalIds);
+      if (grouped.size === 0) {
+        console.warn('[ghost] No elements found');
+        return;
+      }
       
-      // Save original material properties if not already saved
+      // Get all materials and make them semi-transparent (ghost the whole model)
+      const allMaterials = [...(fragments as any).core.models.materials.list.values()];
+      console.log(`[ghost] Found ${allMaterials.length} materials to ghost`);
+      
+      // Save original material properties
       if (!ghostOriginalMaterialsRef.current) {
         ghostOriginalMaterialsRef.current = new Map();
       }
       
-      // Get matching local IDs first
-      const { grouped } = await groupLocalIdsByModel(globalIds);
-      
-      if (grouped.size === 0) {
-        console.warn('ghost: No matching elements found');
-        return;
-      }
-      
-      console.log(`🔍 [ghost] Processing ${grouped.size} models with ${Array.from(grouped.values()).reduce((sum, arr) => sum + arr.length, 0)} matching elements`);
-      
-      // Simple approach: Make ALL elements transparent, then use highlighter to make matching ones opaque
-      // This way we don't need to figure out which materials belong to which elements
-      
-      console.log(`🔍 [ghost] Step 1: Making all materials semi-transparent`);
-      
-      // Get all materials
-      const allMaterials = [...(fragments as any).core.models.materials.list.values()];
-      console.log(`🔍 [ghost] Found ${allMaterials.length} total materials`);
-      
-      let ghostedCount = 0;
-      
-      // First pass: Make ALL materials semi-transparent (ghost everything)
+      // Ghost ALL materials
       for (const material of allMaterials) {
-        if (material.userData?.customId) continue; // Skip custom materials
+        if (material.userData?.customId) continue;
         
-        // Save original properties if not already saved
+        // Save original if not saved
         if (!ghostOriginalMaterialsRef.current.has(material)) {
           let color: number | undefined;
           if ('color' in material) {
@@ -2802,67 +2797,46 @@ const App: React.FC = () => {
           });
         }
         
-        // Ghost ALL materials
+        // Make semi-transparent
         material.transparent = true;
         material.opacity = 0.15;
         material.needsUpdate = true;
-        ghostedCount++;
       }
       
-      console.log(`👻 [ghost] Step 2: Ghosted ${ghostedCount} materials`);
+      console.log(`[ghost] Ghosted ${allMaterials.length} materials`);
       
-      // Second pass: Restore opacity for matching elements by using highlighter
-      // The highlighter.add() method will override the material properties we just set
+      // Now color the matching elements in bright cyan using highlighter.add directly (deprecated but works)
       const highlighter = highlighterRef.current;
-      const world = worldRef.current;
-      
-      if (highlighter && world) {
-        try {
-          console.log(`🔍 [ghost] Step 3: Restoring opacity for matching elements using highlighter.add()`);
-          
-          // For each model, use highlighter.add to restore the matching elements
-          for (const [modelId, localIds] of grouped.entries()) {
-            const model = fragments.list.get(modelId);
-            if (!model || !localIds.length) continue;
-            
-            const ids = Array.from(localIds);
-            console.log(`🔍 [ghost] Restoring ${ids.length} elements in model ${modelId}`);
-            
-            // Use highlighter.add with a fully opaque "color" (we'll restore the actual color)
-            // The color doesn't matter much - we just need to override the transparency
-            if (typeof highlighter.add === 'function') {
-              try {
-                // Use a neutral color (white = 0xffffff) with full opacity
-                // This will override the ghosted material settings
-                highlighter.add(model, ids, 0xffffff);
-                console.log(`✅ [ghost] Restored ${ids.length} elements using highlighter.add()`);
-              } catch (error) {
-                console.error(`Failed to restore elements in model ${modelId}:`, error);
-              }
-            } else {
-              console.warn('highlighter.add() not available');
-            }
-          }
-          
-          // Force a render update
-          if (typeof world.update === 'function') {
-            try {
-              world.update();
-              console.log('🔍 [ghost] Forced world update');
-            } catch (updateError) {
-              console.debug('World update failed:', updateError);
-            }
-          }
-          
-          console.log(`✅ [ghost] Matched elements restored to full opacity`);
-        } catch (error) {
-          console.error('ghost: Failed to restore matching elements', error);
-        }
-      } else {
-        console.warn('ghost: Highlighter or world not available, matching elements will also be ghosted');
+      if (!highlighter) {
+        console.warn('[ghost] Highlighter not available');
+        world.update();
+        return;
       }
       
-      console.log(`👻 [ghost] Complete: ghosted all materials, restored ${Array.from(grouped.values()).reduce((sum, arr) => sum + arr.length, 0)} matching elements`);
+      const cyan = new THREE.Color(0, 1, 1);
+      const cyanHex = cyan.getHex();
+      
+      let coloredCount = 0;
+      for (const [modelId, localIds] of grouped.entries()) {
+        const model = fragments.list.get(modelId);
+        if (!model) continue;
+        
+        try {
+          // Use add (even though deprecated) because it actually works
+          if (typeof highlighter.add === 'function') {
+            highlighter.add(model, Array.from(localIds), cyanHex);
+            coloredCount += localIds.length;
+            console.log(`[ghost] Colored ${localIds.length} elements in model ${modelId}`);
+          }
+        } catch (error) {
+          console.error(`[ghost] Failed to color elements in model ${modelId}:`, error);
+        }
+      }
+      
+      // Force update
+      world.update();
+      
+      console.log(`[ghost] Complete: ghosted ${allMaterials.length} materials, colored ${coloredCount} matching elements in cyan`);
     },
     // On-demand property loading (ThatOpen pattern)
     getItemsData: async (globalIds: string[], config?: any) => {
