@@ -1,12 +1,11 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import Draggable from 'react-draggable';
-import { Paper, IconButton, TextField, Button, Typography, Box, CircularProgress } from '@mui/material';
-import { Chat as ChatIcon, Minimize, OpenInFull, Close as CloseIcon } from '@mui/icons-material';
+import { Paper, IconButton, TextField, Button, Typography, Box, CircularProgress, Alert } from '@mui/material';
+import { Chat as ChatIcon, Minimize, OpenInFull, Close as CloseIcon, Settings as SettingsIcon } from '@mui/icons-material';
 import { GoogleGenerativeAI, Content } from '@google/generative-ai';
-
-// --- Configuration ---
-const GEMINI_MODEL = 'gemini-2.5-flash';
-const API_KEY = import.meta.env.VITE_GEMINI_API_KEY ?? '';
+import { loadApiConfig } from './utils/apiKeys';
+import { sendGeminiMessage } from './ai/gemini';
+import { sendOpenAIMessage } from './ai/openai';
 
 export interface SelectionCommand {
   action: 'select' | 'clear';
@@ -65,15 +64,6 @@ const parseSelectionFromResponse = (raw: string): { cleaned: string; command: Se
   }
 };
 
-const createModel = () => {
-  const key = API_KEY.trim();
-  if (!key) {
-    throw new Error('MISSING_GEMINI_KEY');
-  }
-  const genAI = new GoogleGenerativeAI(key);
-  return genAI.getGenerativeModel({ model: GEMINI_MODEL });
-};
-
 interface Message {
   role: 'user' | 'model' | 'system';
   text: string;
@@ -86,15 +76,17 @@ interface ChatWindowProps {
   onClose: () => void;
   expandSignal: number;
   onRequestSelection?: (command: SelectionCommand) => void;
+  onOpenSettings?: () => void;
 }
 
-const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOpen, onClose, expandSignal, onRequestSelection }) => {
+const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOpen, onClose, expandSignal, onRequestSelection, onOpenSettings }) => {
   const [isMinimized, setIsMinimized] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     { role: 'system', text: 'Hello! I am your BIM assistant. Ask me anything about the loaded models.' }
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [apiConfig, setApiConfig] = useState(loadApiConfig());
   const nodeRef = useRef(null);
   const [size, setSize] = useState({ width: 400, height: 500 });
   const resizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
@@ -157,39 +149,39 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOp
     }
   }, [isOpen]);
 
+  // Reload API config when window opens
+  useEffect(() => {
+    if (isOpen) {
+      setApiConfig(loadApiConfig());
+    }
+  }, [isOpen]);
+
   const handleSend = async () => {
     const question = input.trim();
     if (!question) return;
+
+    // Check if API is configured
+    if (!apiConfig || apiConfig.provider === 'disabled' || !apiConfig.apiKey) {
+      setMessages(prev => [...prev, { 
+        role: 'system', 
+        text: 'AI is not configured. Please open Settings to configure your API key.' 
+      }]);
+      return;
+    }
 
     const userMessage: Message = { role: 'user', text: question };
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
     setInput('');
 
-    if (!API_KEY.trim()) {
-      setMessages(prev => [...prev, { role: 'system', text: 'Gemini API key is missing. Add VITE_GEMINI_API_KEY to your Vite environment (e.g. .env.local) before chatting.' }]);
-      return;
-    }
-
     setIsLoading(true);
 
     try {
-      const model = createModel();
       // 1. Get contextual data from the main app
       const modelContext = await getModelDataForAI();
 
       // 2. Construct the prompt
-      const history: Content[] = updatedMessages.map(msg => ({
-        role: msg.role === 'system' ? 'model' : msg.role,
-        parts: [{ text: msg.text }]
-      }));
-      
-      const contents: Content[] = [
-        ...history,
-        {
-          role: 'user',
-          parts: [{
-            text: `You are a helpful BIM assistant who can describe models and help users explore geometry.
+      const fullPrompt = `You are a helpful BIM assistant who can describe models and help users explore geometry.
 Follow these instructions carefully:
 - Always provide clear, concise answers grounded in the supplied model data.
 - ${selectionGuidelines}
@@ -199,15 +191,26 @@ MODEL DATA:
 ${modelContext}
 ---
 USER QUESTION:
-${question}`
-          }]
-        }
-      ];
+${question}`;
 
-      // 3. Call Gemini API
-      const result = await model.generateContent({ contents });
-      const response = result.response;
-      const rawText = response.text();
+      // 3. Call AI API based on provider
+      let rawText: string;
+      
+      if (apiConfig.provider === 'gemini') {
+        rawText = await sendGeminiMessage(
+          apiConfig.apiKey,
+          fullPrompt,
+          apiConfig.model
+        );
+      } else if (apiConfig.provider === 'openai') {
+        rawText = await sendOpenAIMessage(
+          apiConfig.apiKey,
+          fullPrompt,
+          apiConfig.model
+        );
+      } else {
+        throw new Error('Unsupported AI provider');
+      }
       const { cleaned, command } = parseSelectionFromResponse(rawText);
 
       const modelMessage: Message = { role: 'model', text: cleaned };
@@ -222,36 +225,23 @@ ${question}`
       }
 
     } catch (error) {
-      console.error('Error calling Gemini API:', error);
-      let hint = 'Sorry, I encountered an error while talking to Gemini.';
+      console.error('Error calling AI API:', error);
+      const providerName = apiConfig?.provider === 'gemini' ? 'Google Gemini' : 'OpenAI';
+      let hint = `Sorry, I encountered an error while talking to ${providerName}.`;
       const asAny = error as any;
       const message = asAny?.message ?? (error instanceof Error ? error.message : '');
-      const status = asAny?.status ?? asAny?.code ?? '';
       const lowerMessage = typeof message === 'string' ? message.toLowerCase() : '';
 
-      if (message === 'MISSING_GEMINI_KEY') {
-        hint = 'Gemini API key is missing. Set VITE_GEMINI_API_KEY and reload the app.';
-      } else if (lowerMessage.includes('401') || status === 401) {
-        hint = 'Gemini rejected the API key (401). Confirm the key is valid and has access to the requested model.';
-      } else if (lowerMessage.includes('403') || status === 403) {
-        hint = 'Gemini returned 403. Ensure the project has access to this model and that billing is enabled.';
-      } else if (lowerMessage.includes('404') || status === 404) {
-        hint = 'Gemini returned 404 for this model. Verify the model name and availability in your project (use ListModels in Google AI Studio or switch to a supported variant).';
-      } else if (lowerMessage.includes('429') || status === 429) {
-        const retry = typeof asAny?.error?.error?.details?.[2]?.retryDelay === 'string'
-          ? asAny.error.error.details[2].retryDelay
-          : asAny?.error?.error?.details?.find?.((detail: any) => typeof detail?.retryDelay === 'string')?.retryDelay;
-        const waitText = retry ? ` Please wait ~${retry.replace(/s$/, ' seconds')} before retrying.` : '';
-        hint = `Gemini quota exceeded (429). You've hit the free tier input-token limit. ${waitText} Consider reducing prompt size, waiting a minute, or upgrading quota.`;
-      } else if (lowerMessage.includes('quota') || lowerMessage.includes('limit')) {
-        hint = 'Gemini reported a quota issue. Check your plan, reduce prompt size, or wait before retrying.';
-      }
-
-      if (typeof asAny?.error === 'object') {
-        const retryInfo = asAny.error?.error?.details?.find?.((detail: any) => typeof detail?.retryDelay === 'string');
-        if (!hint.includes('quota') && retryInfo?.retryDelay) {
-          hint += ` Gemini suggests waiting ~${retryInfo.retryDelay.replace(/s$/, ' seconds')} before retrying.`;
-        }
+      if (lowerMessage.includes('401') || lowerMessage.includes('unauthorized')) {
+        hint = `${providerName} rejected the API key (401). Please check your API key in Settings.`;
+      } else if (lowerMessage.includes('403') || lowerMessage.includes('forbidden')) {
+        hint = `${providerName} returned 403. Ensure your API key has the necessary permissions and billing is enabled.`;
+      } else if (lowerMessage.includes('404')) {
+        hint = `${providerName} returned 404. The requested model may not be available. Try a different model in Settings.`;
+      } else if (lowerMessage.includes('429') || lowerMessage.includes('rate limit') || lowerMessage.includes('quota')) {
+        hint = `${providerName} rate limit exceeded. Please wait a moment before trying again or check your quota.`;
+      } else if (message) {
+        hint = `${providerName} error: ${message}`;
       }
 
       const errorMessage: Message = { role: 'system', text: hint };
@@ -305,8 +295,25 @@ ${question}`
             cursor: 'move'
           }}
         >
-          <Typography variant="subtitle1">BIM AI Assistant</Typography>
+          <Typography variant="subtitle1">
+            BIM AI Assistant
+            {apiConfig && apiConfig.provider !== 'disabled' && (
+              <Typography component="span" variant="caption" sx={{ ml: 1, opacity: 0.8 }}>
+                ({apiConfig.provider === 'gemini' ? 'Gemini' : 'ChatGPT'})
+              </Typography>
+            )}
+          </Typography>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            {onOpenSettings && (
+              <IconButton 
+                size="small" 
+                onClick={onOpenSettings}
+                color="inherit"
+                title="Open Settings"
+              >
+                <SettingsIcon fontSize="small" />
+              </IconButton>
+            )}
             <IconButton 
               size="small" 
               onClick={() => setIsMinimized(!isMinimized)} 
@@ -328,6 +335,17 @@ ${question}`
 
         {!isMinimized && (
           <>
+            {(!apiConfig || apiConfig.provider === 'disabled' || !apiConfig.apiKey) && (
+              <Alert severity="warning" sx={{ m: 1 }}>
+                <Typography variant="body2">
+                  AI is not configured. {onOpenSettings && (
+                    <>
+                      Please <Button size="small" onClick={onOpenSettings} sx={{ textTransform: 'none', p: 0, minWidth: 'auto', verticalAlign: 'baseline' }}>open Settings</Button> to configure your API key.
+                    </>
+                  )}
+                </Typography>
+              </Alert>
+            )}
             <Box sx={{ flex: 1, overflowY: 'auto', padding: 2, minHeight: 0 }}>
               {messages.map((msg, index) => (
                 <Box key={index} sx={{ marginBottom: 1, textAlign: msg.role === 'user' ? 'right' : 'left' }}>

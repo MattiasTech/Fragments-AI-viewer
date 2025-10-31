@@ -23,6 +23,7 @@ import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
 import DialogActions from '@mui/material/DialogActions';
+import Link from '@mui/material/Link';
 import FormControl from '@mui/material/FormControl';
 import FormLabel from '@mui/material/FormLabel';
 import RadioGroup from '@mui/material/RadioGroup';
@@ -52,9 +53,18 @@ import StraightenIcon from '@mui/icons-material/Straighten';
 import CropIcon from '@mui/icons-material/Crop';
 import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
 import ViewInArIcon from '@mui/icons-material/ViewInAr';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import SettingsIcon from '@mui/icons-material/Settings';
+import VisibilityIcon from '@mui/icons-material/Visibility';
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
+import TouchAppIcon from '@mui/icons-material/TouchApp';
+import SelectAllIcon from '@mui/icons-material/SelectAll';
 import * as THREE from 'three';
 import Stats from 'stats.js';
 import type { SelectionCommand } from './ChatWindow';
+import { saveApiConfig, loadApiConfig, clearApiConfig, getAvailableModels, getDefaultModel, type AIProvider, type ApiConfig } from './utils/apiKeys';
+import { testGeminiConnection } from './ai/gemini';
+import { testOpenAIConnection } from './ai/openai';
 const ChatWindow = React.lazy(() => import('./ChatWindow'));
 const IdsPanel = React.lazy(() => import('./ids/IdsPanel'));
 const IdsCreatorPanel = React.lazy(() => import('./ids/IdsCreatorPanel'));
@@ -1221,6 +1231,12 @@ const App: React.FC = () => {
   const highlighterRef = useRef<any>(null);
   const idsOriginalColorsRef = useRef<Map<string, { material: any; color: THREE.Color | null }> | null>(null);
   const ghostOriginalMaterialsRef = useRef<Map<any, { color: number | undefined; transparent: boolean; opacity: number }> | null>(null);
+  
+  // Rectangle selection refs
+  const selectionBoxRef = useRef<HTMLDivElement | null>(null);
+  const isDrawingSelectionRef = useRef(false);
+  const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
+  const selectionModeRef = useRef<'click' | 'rectangle'>('click');
   const [explorerSize, setExplorerSize] = useState({ width: 360, height: 520 });
   const explorerResizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
   const explorerResizingRef = useRef(false);
@@ -1248,9 +1264,23 @@ const App: React.FC = () => {
   const [isModelsSectionCollapsed, setIsModelsSectionCollapsed] = useState(false);
   const [isSelectionPropertiesCollapsed, setIsSelectionPropertiesCollapsed] = useState(false);
   const [isModelTreeCollapsed, setIsModelTreeCollapsed] = useState(false);
+  const [explorerMainTab, setExplorerMainTab] = useState<'models' | 'properties' | 'tree'>('models');
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatExpandSignal, setChatExpandSignal] = useState(0);
   const [isIdsOpen, setIsIdsOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  
+  // Settings dialog state
+  const [settingsProvider, setSettingsProvider] = useState<AIProvider>('disabled');
+  const [settingsApiKey, setSettingsApiKey] = useState('');
+  const [settingsModel, setSettingsModel] = useState('');
+  const [showSettingsApiKey, setShowSettingsApiKey] = useState(false);
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<'success' | 'error' | null>(null);
+  
+  // Selection mode state
+  const [selectionMode, setSelectionMode] = useState<'click' | 'rectangle'>('click');
   const [idsExpandSignal, setIdsExpandSignal] = useState(0);
   const [isIdsCreatorOpen, setIsIdsCreatorOpen] = useState(false);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
@@ -1271,6 +1301,7 @@ const App: React.FC = () => {
   const clippingHelpersRef = useRef<Map<string, THREE.PlaneHelper>>(new Map());
   const measurementToolRef = useRef<OBCF.LengthMeasurement | null>(null);
   const [lastMeasurementValue, setLastMeasurementValue] = useState<string | null>(null);
+  const cameraControlsRef = useRef<any>(null);
 
   const getWorldCamera = useCallback((): OBC.OrthoPerspectiveCamera | null => {
     const world = worldRef.current;
@@ -1281,6 +1312,35 @@ const App: React.FC = () => {
     const camera = getWorldCamera();
     return (camera?.three as THREE.PerspectiveCamera | THREE.OrthographicCamera | undefined) ?? null;
   }, [getWorldCamera]);
+
+  // Sync selection mode state with ref for event handlers
+  useEffect(() => {
+    selectionModeRef.current = selectionMode;
+  }, [selectionMode]);
+
+  // Update camera controls based on selection mode
+  useEffect(() => {
+    const controls = cameraControlsRef.current;
+    if (!controls || !('mouseButtons' in controls)) return;
+    
+    if (selectionMode === 'rectangle') {
+      // Disable left-click rotation for rectangle selection
+      (controls as any).mouseButtons = {
+        left: 0,    // NONE - disabled for rectangle selection
+        middle: 2,  // TRUCK (pan) - middle mouse button
+        right: 0,   // NONE - context menu
+        wheel: 16,  // DOLLY (zoom) - mouse wheel
+      };
+    } else {
+      // Enable left-click rotation for normal click selection
+      (controls as any).mouseButtons = {
+        left: 1,    // ROTATE (orbit) - left mouse button
+        middle: 2,  // TRUCK (pan) - middle mouse button
+        right: 0,   // NONE - context menu
+        wheel: 16,  // DOLLY (zoom) - mouse wheel
+      };
+    }
+  }, [selectionMode]);
 
   useEffect(() => {
     try {
@@ -1602,6 +1662,80 @@ const App: React.FC = () => {
       return next;
     });
   }, []);
+
+  const handleAboutOpen = useCallback(() => {
+    setIsAboutOpen(true);
+  }, []);
+
+  const handleAboutClose = useCallback(() => {
+    setIsAboutOpen(false);
+  }, []);
+
+  const handleSettingsOpen = useCallback(() => {
+    // Load current config
+    const config = loadApiConfig();
+    if (config) {
+      setSettingsProvider(config.provider);
+      setSettingsApiKey(config.apiKey);
+      setSettingsModel(config.model || getDefaultModel(config.provider));
+    } else {
+      setSettingsProvider('disabled');
+      setSettingsApiKey('');
+      setSettingsModel('');
+    }
+    setConnectionTestResult(null);
+    setIsSettingsOpen(true);
+  }, []);
+
+  const handleSettingsClose = useCallback(() => {
+    setIsSettingsOpen(false);
+    setShowSettingsApiKey(false);
+    setConnectionTestResult(null);
+  }, []);
+
+  const handleSettingsSave = useCallback(() => {
+    if (settingsProvider === 'disabled') {
+      clearApiConfig();
+    } else {
+      const config: ApiConfig = {
+        provider: settingsProvider,
+        apiKey: settingsApiKey,
+        model: settingsModel || getDefaultModel(settingsProvider)
+      };
+      saveApiConfig(config);
+    }
+    handleSettingsClose();
+  }, [settingsProvider, settingsApiKey, settingsModel, handleSettingsClose]);
+
+  const handleProviderChange = useCallback((provider: AIProvider) => {
+    setSettingsProvider(provider);
+    setSettingsModel(getDefaultModel(provider));
+    setConnectionTestResult(null);
+  }, []);
+
+  const handleTestConnection = useCallback(async () => {
+    if (!settingsApiKey || settingsProvider === 'disabled') return;
+    
+    setIsTestingConnection(true);
+    setConnectionTestResult(null);
+    
+    try {
+      let success = false;
+      const model = settingsModel || getDefaultModel(settingsProvider);
+      
+      if (settingsProvider === 'gemini') {
+        success = await testGeminiConnection(settingsApiKey, model);
+      } else if (settingsProvider === 'openai') {
+        success = await testOpenAIConnection(settingsApiKey, model);
+      }
+      
+      setConnectionTestResult(success ? 'success' : 'error');
+    } catch {
+      setConnectionTestResult('error');
+    } finally {
+      setIsTestingConnection(false);
+    }
+  }, [settingsProvider, settingsApiKey, settingsModel]);
 
   const extractIfcClassFromData = useCallback((data: any): string => {
     if (!data || typeof data !== 'object') return 'IfcProduct';
@@ -3069,6 +3203,9 @@ const App: React.FC = () => {
     // Configure camera controls: middle mouse button for pan, wheel scroll for zoom
     const cameraControls = world.camera.controls;
     if (cameraControls) {
+      // Store reference for later modification
+      cameraControlsRef.current = cameraControls;
+      
       // Camera-controls library uses mouseButtons property to configure interactions
       if ('mouseButtons' in cameraControls) {
         (cameraControls as any).mouseButtons = {
@@ -4145,6 +4282,105 @@ const App: React.FC = () => {
     // Debounce to improve responsiveness - prevent multiple rapid picks
     let pickTimeout: ReturnType<typeof setTimeout> | null = null;
     
+    const performRectangleSelection = async (left: number, top: number, right: number, bottom: number) => {
+      const fr = fragmentsRef.current;
+      if (!fr) return;
+      
+      const threeCamera = getThreeCamera();
+      if (!threeCamera) {
+        console.warn('Rectangle selection skipped: viewer camera not ready.');
+        return;
+      }
+      
+      const rect = dom.getBoundingClientRect();
+      const raycaster = new THREE.Raycaster();
+      const selectedMap = new Map<string, Set<number>>();
+      
+      // Sample points within the rectangle (grid sampling)
+      const sampleSize = 10; // Sample every 10 pixels
+      const width = right - left;
+      const height = bottom - top;
+      
+      // If rectangle is too small, treat as click
+      if (width < 3 || height < 3) {
+        await pickAt((left + right) / 2, (top + bottom) / 2);
+        return;
+      }
+      
+      for (let x = left; x <= right; x += sampleSize) {
+        for (let y = top; y <= bottom; y += sampleSize) {
+          const mouseX = ((x - rect.left) / rect.width) * 2 - 1;
+          const mouseY = -((y - rect.top) / rect.height) * 2 + 1;
+          
+          mouse.set(mouseX, mouseY);
+          raycaster.setFromCamera(mouse, threeCamera);
+          
+          // Check intersection with all models
+          for (const model of fr.list.values()) {
+            try {
+              // Only raycast against mesh objects, skip helpers and other non-geometry objects
+              if (!model.object) continue;
+              
+              const hits = raycaster.intersectObject(model.object, true);
+              if (hits.length > 0) {
+                const firstHit = hits[0];
+                const instanceId = (firstHit as any).instanceId;
+                
+                if (instanceId !== undefined && instanceId !== null && Number.isInteger(instanceId)) {
+                  const localId = instanceId;
+                  if (!selectedMap.has(model.modelId)) {
+                    selectedMap.set(model.modelId, new Set());
+                  }
+                  selectedMap.get(model.modelId)!.add(localId);
+                }
+              }
+            } catch (error) {
+              // Skip objects that cause raycasting errors (invalid geometry, etc.)
+              console.debug('Skipping object due to raycast error:', error);
+            }
+          }
+        }
+      }
+      
+      // Convert to Selection array
+      const selections: Selection[] = [];
+      for (const [modelId, ids] of selectedMap.entries()) {
+        for (const localId of ids) {
+          selections.push({ modelId, localId });
+        }
+      }
+      
+      if (selections.length === 0) {
+        // No selection
+        setSelectedItems([]);
+        updateSelectedProperties(null);
+        return;
+      }
+      
+      // Update selection
+      const prevSelections = selectedRef.current;
+      const selectionChanged = !selectionsMatch(selections, prevSelections);
+      
+      if (!selectionChanged) return;
+      
+      setSelectedItems(selections);
+      handleExplorerOpen();
+      
+      // Update properties for first selected item
+      if (selections.length > 0) {
+        const primary = selections[0];
+        const model = fr.list.get(primary.modelId);
+        if (model) {
+          try {
+            const [data] = await model.getItemsData([primary.localId], FRAGMENTS_ITEM_DATA_OPTIONS);
+            updateSelectedProperties(data || null);
+          } catch (error) {
+            console.warn('Failed to fetch properties for rectangle selection', error);
+          }
+        }
+      }
+    };
+    
     const pickAt = async (clientX: number, clientY: number) => {
       const fr = fragmentsRef.current; if (!fr) return;
       const threeCamera = getThreeCamera();
@@ -4161,6 +4397,7 @@ const App: React.FC = () => {
     
     // Use Open Company's built-in raycasting for better performance
     for (const model of fr.list.values()) {
+      try {
         const hit = await model.raycast({ camera: threeCamera, mouse, dom: world.renderer!.three.domElement! });
         if (hit && typeof hit.distance === 'number') {
           const pt = (hit as any).point instanceof THREE.Vector3
@@ -4175,7 +4412,11 @@ const App: React.FC = () => {
             instanceId: (hit as any).instanceId,
           } as any;
         }
+      } catch (error) {
+        // Skip models that cause raycasting errors
+        console.debug('Skipping model due to raycast error:', error);
       }
+    }
       if (!best) return;
       
       // Always use Open Company's Highlighter API for consistent, performant highlighting
@@ -4286,15 +4527,81 @@ const App: React.FC = () => {
     const onPointerDown = async (ev: PointerEvent) => {
       setContextMenu(null);
       if (ev.button !== 0) return; // left button only
-      // Use immediate pick on click for responsiveness
-      await pickAt(ev.clientX, ev.clientY);
+      
+      // Check selection mode
+      if (selectionModeRef.current === 'rectangle' && !isMeasuringRef.current) {
+        // Start rectangle selection
+        isDrawingSelectionRef.current = true;
+        selectionStartRef.current = { x: ev.clientX, y: ev.clientY };
+        
+        // Create or show selection box
+        if (!selectionBoxRef.current) {
+          const box = document.createElement('div');
+          box.style.position = 'fixed';
+          box.style.border = '2px solid #1976d2';
+          box.style.backgroundColor = 'rgba(25, 118, 210, 0.1)';
+          box.style.pointerEvents = 'none';
+          box.style.zIndex = '10000';
+          document.body.appendChild(box);
+          selectionBoxRef.current = box;
+        }
+        
+        const box = selectionBoxRef.current;
+        box.style.left = `${ev.clientX}px`;
+        box.style.top = `${ev.clientY}px`;
+        box.style.width = '0px';
+        box.style.height = '0px';
+        box.style.display = 'block';
+      } else {
+        // Use immediate pick on click for responsiveness (click mode)
+        await pickAt(ev.clientX, ev.clientY);
+      }
     };
+    
+    const onPointerMove = (ev: PointerEvent) => {
+      if (!isDrawingSelectionRef.current || !selectionStartRef.current || !selectionBoxRef.current) return;
+      
+      const start = selectionStartRef.current;
+      const box = selectionBoxRef.current;
+      
+      const left = Math.min(ev.clientX, start.x);
+      const top = Math.min(ev.clientY, start.y);
+      const width = Math.abs(ev.clientX - start.x);
+      const height = Math.abs(ev.clientY - start.y);
+      
+      box.style.left = `${left}px`;
+      box.style.top = `${top}px`;
+      box.style.width = `${width}px`;
+      box.style.height = `${height}px`;
+    };
+    
+    const onPointerUp = async (ev: PointerEvent) => {
+      if (isDrawingSelectionRef.current && selectionStartRef.current && selectionBoxRef.current) {
+        // Complete rectangle selection
+        const start = selectionStartRef.current;
+        const box = selectionBoxRef.current;
+        
+        box.style.display = 'none';
+        isDrawingSelectionRef.current = false;
+        
+        const left = Math.min(ev.clientX, start.x);
+        const top = Math.min(ev.clientY, start.y);
+        const right = Math.max(ev.clientX, start.x);
+        const bottom = Math.max(ev.clientY, start.y);
+        
+        // Perform selection in rectangle
+        await performRectangleSelection(left, top, right, bottom);
+        
+        selectionStartRef.current = null;
+      }
+    };
+    
     const onClick = async (ev: MouseEvent) => {
       setContextMenu(null);
       
       // Always allow measurement tool events to pass through
       // Just skip our own selection logic when measuring
-      if (!isMeasuringRef.current) {
+      if (!isMeasuringRef.current && selectionModeRef.current === 'click') {
         await pickAt(ev.clientX, ev.clientY);
       }
     };
@@ -4330,6 +4637,8 @@ const App: React.FC = () => {
     };
     
     dom.addEventListener('pointerdown', onPointerDown, { capture: true } as AddEventListenerOptions);
+    dom.addEventListener('pointermove', onPointerMove);
+    dom.addEventListener('pointerup', onPointerUp);
     dom.addEventListener('click', onClick);
     dom.addEventListener('dblclick', onDoubleClick);
     dom.addEventListener('contextmenu', onContextMenu);
@@ -4342,10 +4651,19 @@ const App: React.FC = () => {
       }
       
       dom.removeEventListener('pointerdown', onPointerDown, { capture: true } as AddEventListenerOptions);
+      dom.removeEventListener('pointermove', onPointerMove);
+      dom.removeEventListener('pointerup', onPointerUp);
       dom.removeEventListener('click', onClick);
       dom.removeEventListener('dblclick', onDoubleClick);
       dom.removeEventListener('contextmenu', onContextMenu);
       window.removeEventListener('keydown', onKeyDown);
+      
+      // Cleanup selection box
+      if (selectionBoxRef.current) {
+        selectionBoxRef.current.remove();
+        selectionBoxRef.current = null;
+      }
+      
       // Cleanup marker
       try {
         const marker = selectionMarkerRef.current;
@@ -4684,8 +5002,18 @@ const App: React.FC = () => {
       <AppBar position="static">
         <Toolbar>
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            Fragments AI Viewer
+            BIM Viewer (Preview)
           </Typography>
+          <Tooltip title="Settings">
+            <IconButton color="inherit" onClick={handleSettingsOpen} sx={{ mr: 1 }}>
+              <SettingsIcon />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="About">
+            <IconButton color="inherit" onClick={handleAboutOpen} sx={{ mr: 1 }}>
+              <InfoOutlinedIcon />
+            </IconButton>
+          </Tooltip>
           <Button
             color="inherit"
             onClick={toggleExplorerWindow}
@@ -4849,8 +5177,8 @@ const App: React.FC = () => {
             </Box>
 
             {!isExplorerMinimized && (
-              <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, px: 2, py: 1, minHeight: 0 }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 1, minHeight: 0 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: 1 }}>
                   <Button variant="contained" size="small" onClick={() => fileInputRef.current?.click()} disabled={!componentsReady}>
                     Open IFC / FRAG
                   </Button>
@@ -4893,100 +5221,70 @@ const App: React.FC = () => {
                   />
                 </Box>
 
-                <Box
+                <Tabs
+                  value={explorerMainTab}
+                  onChange={(_, value) => setExplorerMainTab(value as 'models' | 'properties' | 'tree')}
+                  variant="fullWidth"
                   sx={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 1,
-                    overflow: 'hidden',
-                    flexGrow: isModelsSectionFlexible ? 1 : 0,
-                    flexShrink: isModelsSectionFlexible ? 1 : 0,
-                    flexBasis: isModelsSectionFlexible ? 0 : 'auto',
-                    minHeight: 0,
+                    borderBottom: 1,
+                    borderColor: 'divider',
+                    minHeight: 'auto',
+                    '.MuiTab-root': {
+                      minHeight: 48,
+                      textTransform: 'none',
+                      fontWeight: 500,
+                    },
                   }}
                 >
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Typography variant="subtitle2">Loaded Models</Typography>
-                    <IconButton 
-                      size="small" 
-                      onClick={() => setIsModelsSectionCollapsed((prev) => !prev)}
-                      title={isModelsSectionCollapsed ? "Expand Loaded Models" : "Collapse Loaded Models"}
-                    >
-                      {isModelsSectionCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
-                    </IconButton>
-                  </Box>
-                  <Collapse
-                    in={!isModelsSectionCollapsed}
-                    timeout="auto"
-                    sx={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      flex: isModelsSectionFlexible ? '1 1 0' : '0 0 auto',
-                      maxHeight: isModelsSectionFlexible ? '100%' : `${modelsSectionMaxHeight}px`,
-                      minHeight: 0,
-                    }}
-                  >
-                    <Box
-                      ref={modelsListContainerRef}
-                      sx={{
-                        border: '1px solid',
-                        borderColor: 'divider',
-                        borderRadius: 1,
-                        p: 1,
-                        overflowY: 'auto',
-                        flex: isModelsSectionFlexible ? '1 1 0' : '0 0 auto',
-                        maxHeight: isModelsSectionFlexible ? '100%' : `${modelsSectionMaxHeight}px`,
-                        minHeight: 0,
-                      }}
-                    >
-                      {!componentsReady && (
-                        <Typography variant="body2" color="text.secondary">Initializing components…</Typography>
-                      )}
-                    </Box>
-                  </Collapse>
-                </Box>
+                  <Tab value="models" label="Models" />
+                  <Tab value="properties" label="Properties" />
+                  <Tab value="tree" label="Model Tree" />
+                </Tabs>
+
                 <Box
-                  sx={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minHeight: 0 }}
+                  role="tabpanel"
+                  hidden={explorerMainTab !== 'models'}
+                  sx={{
+                    display: explorerMainTab === 'models' ? 'flex' : 'none',
+                    flexDirection: 'column',
+                    flex: 1,
+                    minHeight: 0,
+                    px: 2,
+                    py: 1,
+                  }}
                 >
                   <Box
+                    ref={modelsListContainerRef}
                     sx={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 1.25,
-                      overflow: 'hidden',
-                      borderRadius: 1.5,
                       border: '1px solid',
-                      borderColor: 'rgba(229, 57, 53, 0.45)',
-                      bgcolor: 'rgba(229, 57, 53, 0.08)',
-                      p: 1.5,
-                      flexGrow: isSelectionPropertiesCollapsed ? 0 : 1,
-                      flexShrink: isSelectionPropertiesCollapsed ? 0 : 1,
-                      flexBasis: 'auto',
+                      borderColor: 'divider',
+                      borderRadius: 1,
+                      p: 1,
+                      overflowY: 'auto',
+                      flex: 1,
                       minHeight: 0,
                     }}
                   >
-                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                      <Typography variant="subtitle2">Selection Properties</Typography>
-                      <IconButton 
-                        size="small" 
-                        onClick={() => setIsSelectionPropertiesCollapsed((prev) => !prev)}
-                        title={isSelectionPropertiesCollapsed ? "Expand Selection Properties" : "Collapse Selection Properties"}
-                      >
-                        {isSelectionPropertiesCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
-                      </IconButton>
-                    </Box>
-                    <Collapse
-                      in={!isSelectionPropertiesCollapsed}
-                      timeout="auto"
-                      sx={{
-                        flex: isSelectionPropertiesCollapsed ? '0 0 auto' : '1 1 0',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        minHeight: 0,
-                        overflow: 'hidden',
-                      }}
-                    >
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1, minHeight: 0 }}>
+                    {!componentsReady && (
+                      <Typography variant="body2" color="text.secondary">Initializing components…</Typography>
+                    )}
+                  </Box>
+                </Box>
+
+                <Box
+                  role="tabpanel"
+                  hidden={explorerMainTab !== 'properties'}
+                  sx={{
+                    display: explorerMainTab === 'properties' ? 'flex' : 'none',
+                    flexDirection: 'column',
+                    flex: 1,
+                    minHeight: 0,
+                    px: 2,
+                    py: 1,
+                    gap: 1,
+                  }}
+                >
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1, minHeight: 0 }}>
                         <Tabs
                           value={selectedPropertyTab}
                           onChange={(_, value) => setSelectedPropertyTab(value as PropertyTabId)}
@@ -5185,48 +5483,22 @@ const App: React.FC = () => {
                           )}
                         </Box>
                       </Box>
-                    </Collapse>
                   </Box>
 
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 1.25,
-                      overflow: 'hidden',
-                      borderRadius: 1.5,
-                      border: '1px solid',
-                      borderColor: 'rgba(255, 179, 0, 0.5)',
-                      bgcolor: 'rgba(255, 213, 79, 0.12)',
-                      p: 1.5,
-                      flexGrow: isModelTreeCollapsed ? 0 : 1,
-                      flexShrink: isModelTreeCollapsed ? 0 : 1,
-                      flexBasis: 'auto',
-                      minHeight: 0,
-                    }}
-                  >
-                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                      <Typography variant="subtitle2">Model Tree</Typography>
-                      <IconButton 
-                        size="small" 
-                        onClick={() => setIsModelTreeCollapsed((prev) => !prev)}
-                        title={isModelTreeCollapsed ? "Expand Model Tree" : "Collapse Model Tree"}
-                      >
-                        {isModelTreeCollapsed ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
-                      </IconButton>
-                    </Box>
-                    <Collapse
-                      in={!isModelTreeCollapsed}
-                      timeout="auto"
-                      sx={{
-                        flex: isModelTreeCollapsed ? '0 0 auto' : '1 1 0',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        minHeight: 0,
-                        overflow: 'hidden',
-                      }}
-                    >
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1, minHeight: 0 }}>
+                <Box
+                  role="tabpanel"
+                  hidden={explorerMainTab !== 'tree'}
+                  sx={{
+                    display: explorerMainTab === 'tree' ? 'flex' : 'none',
+                    flexDirection: 'column',
+                    flex: 1,
+                    minHeight: 0,
+                    px: 2,
+                    py: 1,
+                    gap: 1,
+                  }}
+                >
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1, minHeight: 0 }}>
                         <TextField
                           size="small"
                           fullWidth
@@ -5275,9 +5547,7 @@ const App: React.FC = () => {
                           )}
                         </Box>
                       </Box>
-                    </Collapse>
                   </Box>
-                </Box>
               </Box>
             )}
             <Box
@@ -5719,6 +5989,67 @@ const App: React.FC = () => {
               </Typography>
             )}
           </Box>
+
+          {/* Selection Mode Toggle */}
+          <Box sx={{ mt: 0.5 }}>
+            <Typography variant="caption" sx={{ color: 'text.primary', fontWeight: 600, display: 'block', mb: 0.5 }}>
+              Selection Mode
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 0.5 }}>
+              <Tooltip title="Click selection" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={() => setSelectionMode('click')}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: selectionMode === 'click' ? 'primary.main' : 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: selectionMode === 'click' ? 'primary.main' : 'white',
+                    color: selectionMode === 'click' ? 'white' : 'primary.main',
+                    '&:hover': { 
+                      backgroundColor: selectionMode === 'click' ? 'primary.dark' : 'primary.light',
+                      borderColor: 'primary.main',
+                      color: selectionMode === 'click' ? 'white' : 'primary.dark'
+                    }
+                  }}
+                >
+                  <TouchAppIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Rectangle selection" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={() => setSelectionMode('rectangle')}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: selectionMode === 'rectangle' ? 'secondary.main' : 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: selectionMode === 'rectangle' ? 'secondary.main' : 'white',
+                    color: selectionMode === 'rectangle' ? 'white' : 'secondary.main',
+                    '&:hover': { 
+                      backgroundColor: selectionMode === 'rectangle' ? 'secondary.dark' : 'secondary.light',
+                      borderColor: 'secondary.main',
+                      color: selectionMode === 'rectangle' ? 'white' : 'secondary.dark'
+                    }
+                  }}
+                >
+                  <SelectAllIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Box>
+            {selectionMode === 'rectangle' && (
+              <Alert 
+                severity="info" 
+                sx={{ 
+                  mt: 0.5, 
+                  py: 0, 
+                  px: 1,
+                  fontSize: '0.7rem',
+                  '& .MuiAlert-icon': { fontSize: '0.9rem', py: 0.25 }
+                }}
+              >
+                Rotation disabled. Use middle-click to pan.
+              </Alert>
+            )}
+          </Box>
         </Paper>
         </Draggable>
       ) : (
@@ -5735,6 +6066,218 @@ const App: React.FC = () => {
           <ModelFilterPanel open={isFilterDialogOpen} onClose={() => setIsFilterDialogOpen(false)} viewerApi={viewerApiRef.current ?? null} />
         )}
       </Suspense>
+
+      <Dialog open={isSettingsOpen} onClose={handleSettingsClose} fullWidth maxWidth="sm">
+        <DialogTitle>Settings</DialogTitle>
+        <DialogContent dividers>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, py: 1 }}>
+            <FormControl component="fieldset">
+              <FormLabel component="legend" sx={{ mb: 1 }}>AI Provider</FormLabel>
+              <RadioGroup
+                value={settingsProvider}
+                onChange={(e) => handleProviderChange(e.target.value as AIProvider)}
+              >
+                <FormControlLabel 
+                  value="gemini" 
+                  control={<Radio />} 
+                  label="Google Gemini" 
+                />
+                <FormControlLabel 
+                  value="openai" 
+                  control={<Radio />} 
+                  label="OpenAI (ChatGPT)" 
+                />
+                <FormControlLabel 
+                  value="disabled" 
+                  control={<Radio />} 
+                  label="Disabled (No AI)" 
+                />
+              </RadioGroup>
+            </FormControl>
+
+            {settingsProvider !== 'disabled' && (
+              <>
+                <TextField
+                  label="API Key"
+                  type={showSettingsApiKey ? 'text' : 'password'}
+                  value={settingsApiKey}
+                  onChange={(e) => setSettingsApiKey(e.target.value)}
+                  fullWidth
+                  placeholder={`Enter your ${settingsProvider === 'gemini' ? 'Google Gemini' : 'OpenAI'} API key`}
+                  InputProps={{
+                    endAdornment: (
+                      <IconButton
+                        onClick={() => setShowSettingsApiKey(!showSettingsApiKey)}
+                        edge="end"
+                        size="small"
+                      >
+                        {showSettingsApiKey ? <VisibilityOffIcon /> : <VisibilityIcon />}
+                      </IconButton>
+                    )
+                  }}
+                  helperText={
+                    settingsProvider === 'gemini' 
+                      ? 'Get your API key from: https://makersuite.google.com/app/apikey'
+                      : 'Get your API key from: https://platform.openai.com/api-keys'
+                  }
+                />
+
+                <TextField
+                  select
+                  label="Model"
+                  value={settingsModel}
+                  onChange={(e) => setSettingsModel(e.target.value)}
+                  fullWidth
+                  SelectProps={{
+                    native: true,
+                  }}
+                  helperText="Select the AI model to use"
+                >
+                  {getAvailableModels(settingsProvider).map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </TextField>
+
+                <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                  <Button
+                    variant="outlined"
+                    onClick={handleTestConnection}
+                    disabled={!settingsApiKey || isTestingConnection}
+                    size="small"
+                  >
+                    {isTestingConnection ? 'Testing...' : 'Test Connection'}
+                  </Button>
+                  {connectionTestResult === 'success' && (
+                    <Typography variant="body2" color="success.main" sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                      ✓ Connection successful
+                    </Typography>
+                  )}
+                  {connectionTestResult === 'error' && (
+                    <Typography variant="body2" color="error.main" sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                      ✗ Connection failed
+                    </Typography>
+                  )}
+                </Box>
+
+                <Alert severity="info" variant="outlined">
+                  <Typography variant="body2">
+                    <strong>Security Note:</strong> Your API key is stored locally in your browser's localStorage and never sent to our servers. 
+                    All AI requests are made directly from your browser to {settingsProvider === 'gemini' ? 'Google' : 'OpenAI'}.
+                  </Typography>
+                </Alert>
+              </>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleSettingsClose}>Cancel</Button>
+          <Button 
+            onClick={handleSettingsSave} 
+            variant="contained" 
+            color="primary"
+            disabled={settingsProvider !== 'disabled' && !settingsApiKey}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={isAboutOpen} onClose={handleAboutClose} fullWidth maxWidth="md">
+        <DialogTitle>About BIM Viewer</DialogTitle>
+        <DialogContent dividers sx={{ maxHeight: '70vh', overflowY: 'auto' }}>
+          <Typography variant="h6" gutterBottom>
+            Version 0.1.1 Preview
+          </Typography>
+          
+          <Typography variant="body2" color="text.secondary" paragraph>
+            A powerful web-based 3D viewer for Building Information Modeling (BIM) files with integrated IDS validation and AI-powered assistance. Built on That Open Company BIM Toolkit and Three.js. <br />
+            For bug reporting and more information, visit our <Link href="https://github.com/MattiasTech/Fragments-AI-viewer" target="_blank" rel="noopener">website</Link>. <br />
+            <span style={{ fontWeight: 'bold' }}>Note: No data is collected or sent to any servers; all processing occurs locally in your browser.</span>
+          </Typography>
+
+          <Typography variant="h6" gutterBottom sx={{ mt: 3 }}>
+            Features
+          </Typography>
+
+          <Typography variant="subtitle1" gutterBottom sx={{ mt: 2, fontWeight: 'bold' }}>
+            Model Viewing
+          </Typography>
+          <Typography variant="body2" component="div" sx={{ pl: 2 }}>
+            • Multiple format support (IFC, Fragments)<br/>
+            • Pan, zoom, rotate navigation<br/>
+            • Selection via point-and-click or rectangular region<br/>
+            • Orthogonal projection for accurate measurements<br/>
+            • View management (zoom to fit, home, cube orientation)<br/>
+            • Toggle performance stats<br/>
+            • Object measurement tools<br/>
+            • Clipping planes for sectional views
+          </Typography>
+
+          <Typography variant="subtitle1" gutterBottom sx={{ mt: 2, fontWeight: 'bold' }}>
+            Model Explorer
+          </Typography>
+          <Typography variant="body2" component="div" sx={{ pl: 2 }}>
+            • Spatial and classification hierarchy navigation<br/>
+            • Tree-based model structure view<br/>
+            • Properties panel with expand/collapse<br/>
+            • Search and filter functionality<br/>
+            • Property export (CSV, JSON)<br/>
+            • Favorites system for quick access<br/>
+            • Parametric filtering with Ghost/Isolate modes
+          </Typography>
+
+          <Typography variant="subtitle1" gutterBottom sx={{ mt: 2, fontWeight: 'bold' }}>
+            IDS Checker
+          </Typography>
+          <Typography variant="body2" component="div" sx={{ pl: 2 }}>
+            • Validate models against Information Delivery Specification (IDS)<br/>
+            • Load IDS files from local storage<br/>
+            • Visual feedback: green (pass) and red (fail) indicators<br/>
+            • Filter models by validation results<br/>
+            • Export validation reports
+          </Typography>
+
+          <Typography variant="subtitle1" gutterBottom sx={{ mt: 2, fontWeight: 'bold' }}>
+            IDS Creator
+          </Typography>
+          <Typography variant="body2" component="div" sx={{ pl: 2 }}>
+            • Visual authoring tool for IDS specifications<br/>
+            • Capture and define validation rules<br/>
+            • Property picker for easy specification setup<br/>
+            • Save and load IDS files<br/>
+            • Integration with IDS Checker for immediate validation
+          </Typography>
+
+          <Typography variant="subtitle1" gutterBottom sx={{ mt: 2, fontWeight: 'bold' }}>
+            BIM AI Assistant
+          </Typography>
+          <Typography variant="body2" component="div" sx={{ pl: 2 }}>
+            • Natural language queries about model contents<br/>
+            • Intelligent model analysis and insights<br/>
+            • Context-aware responses based on selected elements<br/>
+            • Interactive chat interface<br/>
+            • Selection and filtering via conversation
+          </Typography>
+
+          <Typography variant="subtitle1" gutterBottom sx={{ mt: 2, fontWeight: 'bold' }}>
+            User Experience
+          </Typography>
+          <Typography variant="body2" component="div" sx={{ pl: 2 }}>
+            • Floating toolbar for model operations<br/>
+            • Tooltips and keyboard shortcuts<br/>
+            • Collapsible side panels<br/>
+            • Responsive layout<br/>
+            • Dark theme optimized for long viewing sessions
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleAboutClose} color="primary">
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog open={exportDialogOpen} onClose={handleCloseExportDialog} fullWidth maxWidth="sm">
         <DialogTitle>Export properties</DialogTitle>
@@ -5832,6 +6375,7 @@ const App: React.FC = () => {
             onClose={closeChatWindow}
             expandSignal={chatExpandSignal}
             onRequestSelection={handleAISelection}
+            onOpenSettings={handleSettingsOpen}
           />
         </Suspense>
 
