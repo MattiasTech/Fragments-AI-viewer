@@ -6364,10 +6364,10 @@ const App: React.FC = () => {
       </Dialog>
 
       <Dialog open={isAboutOpen} onClose={handleAboutClose} fullWidth maxWidth="md">
-        <DialogTitle>About BIM Viewer</DialogTitle>
+        <DialogTitle>About Savora Viewer</DialogTitle>
         <DialogContent dividers sx={{ maxHeight: '70vh', overflowY: 'auto' }}>
           <Typography variant="h6" gutterBottom>
-            Version 0.1.1 Preview
+            Version 0.2.1 Preview
           </Typography>
           
           <Typography variant="body2" color="text.secondary" paragraph>
