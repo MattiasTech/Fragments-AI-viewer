@@ -408,22 +408,26 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
     setActiveTab('summary');
   }, [runCheck, viewerApi]);
 
-  const handleClose = useCallback(async () => {
-    // Clear any highlights when closing the panel
-    if (viewerApi) {
-      try {
-        if (typeof viewerApi.clearColors === 'function') {
-          await Promise.resolve(viewerApi.clearColors());
-        }
-        if (typeof viewerApi.clearIsolation === 'function') {
-          await Promise.resolve(viewerApi.clearIsolation());
-        }
-      } catch (error) {
-        console.warn('Failed to clear IDS highlights on close', error);
-      }
-    }
+  const handleClose = useCallback(() => {
+    // Close the panel first
     setIsMinimized(false);
     onClose();
+    
+    // Clear any highlights after closing (async, non-blocking)
+    if (viewerApi) {
+      Promise.resolve().then(async () => {
+        try {
+          if (typeof viewerApi.clearColors === 'function') {
+            await Promise.resolve(viewerApi.clearColors());
+          }
+          if (typeof viewerApi.clearIsolation === 'function') {
+            await Promise.resolve(viewerApi.clearIsolation());
+          }
+        } catch (error) {
+          console.warn('Failed to clear IDS highlights on close', error);
+        }
+      });
+    }
   }, [viewerApi, onClose]);
 
   useEffect(() => {
@@ -668,13 +672,7 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   }, [isOpen, viewerApi]);
 
   if (!isOpen) {
-    return (
-      <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 160, zIndex: 1900 }}>
-        <IconButton onClick={onOpen} title="Open IDS Checker">
-          <RuleIcon />
-        </IconButton>
-      </Paper>
-    );
+    return null;
   }
 
   return (

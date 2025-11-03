@@ -531,11 +531,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
         {/* Content */}
         {!isMinimized && (
           <Box sx={{ p: 2, overflowY: 'auto', flex: 1 }}>
-            {/* Info Alert */}
-            <Alert severity="info" sx={{ mb: 2 }}>
-              <strong>On-Demand Mode:</strong> Properties loaded when filtering. No extraction needed!
-            </Alert>
-            
             {/* Result Summary */}
             {filterActive && resultSummary && (
               <Alert severity="success" sx={{ mb: 2 }}>

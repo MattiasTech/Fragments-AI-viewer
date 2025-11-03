@@ -252,13 +252,7 @@ ${question}`;
   };
 
   if (!isOpen) {
-    return (
-      <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 20, zIndex: 2100 }}>
-        <IconButton onClick={onOpen} title="Open BIM AI Assistant">
-          <ChatIcon />
-        </IconButton>
-      </Paper>
-    );
+    return null;
   }
 
   return (

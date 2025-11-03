@@ -4283,8 +4283,15 @@ const App: React.FC = () => {
     let pickTimeout: ReturnType<typeof setTimeout> | null = null;
     
     const performRectangleSelection = async (left: number, top: number, right: number, bottom: number) => {
+      console.log('🔷 Rectangle Selection Started (viewport coords)', { left, top, right, bottom });
+      
       const fr = fragmentsRef.current;
-      if (!fr) return;
+      if (!fr) {
+        console.warn('❌ No fragments manager');
+        return;
+      }
+      
+      console.log('📦 Models available:', fr.list.size);
       
       const threeCamera = getThreeCamera();
       if (!threeCamera) {
@@ -4293,6 +4300,13 @@ const App: React.FC = () => {
       }
       
       const rect = dom.getBoundingClientRect();
+      console.log('📏 Canvas bounds:', { 
+        rectLeft: rect.left, 
+        rectTop: rect.top, 
+        rectWidth: rect.width, 
+        rectHeight: rect.height 
+      });
+      
       const raycaster = new THREE.Raycaster();
       const selectedMap = new Map<string, Set<number>>();
       
@@ -4301,33 +4315,86 @@ const App: React.FC = () => {
       const width = right - left;
       const height = bottom - top;
       
+      console.log('📐 Rectangle size:', { width, height, sampleSize });
+      
       // If rectangle is too small, treat as click
       if (width < 3 || height < 3) {
+        console.log('⚠️ Rectangle too small, using click selection');
         await pickAt((left + right) / 2, (top + bottom) / 2);
         return;
       }
       
+      let samplePoints = 0;
+      let hitCount = 0;
+      
+      // Debug: Log the first sample point for comparison with click
+      let firstSample = true;
+      
       for (let x = left; x <= right; x += sampleSize) {
         for (let y = top; y <= bottom; y += sampleSize) {
+          samplePoints++;
+          
+          // Convert screen coordinates to normalized device coordinates (NDC)
           const mouseX = ((x - rect.left) / rect.width) * 2 - 1;
           const mouseY = -((y - rect.top) / rect.height) * 2 + 1;
           
+          // Update the shared mouse vector with NDC coordinates
           mouse.set(mouseX, mouseY);
-          raycaster.setFromCamera(mouse, threeCamera);
           
-          // Check intersection with all models
+          if (firstSample) {
+            console.log('🔍 First sample point:', {
+              screenCoords: { x, y },
+              rectBounds: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+              mouseNDC: { x: mouseX, y: mouseY },
+              mouseVector: mouse.clone()
+            });
+          }
+          
+          // Check intersection with all models using ThatOpen's raycast method
           for (const model of fr.list.values()) {
             try {
-              // Only raycast against mesh objects, skip helpers and other non-geometry objects
-              if (!model.object) continue;
+              // Create a new Vector2 for each raycast to avoid reference issues
+              const mouseVec = new THREE.Vector2(mouseX, mouseY);
               
-              const hits = raycaster.intersectObject(model.object, true);
-              if (hits.length > 0) {
-                const firstHit = hits[0];
-                const instanceId = (firstHit as any).instanceId;
+              // Debug: Log raycast params for first sample only
+              if (firstSample) {
+                console.log('🔬 Raycast params:', {
+                  mouseVec: mouseVec.clone(),
+                  cameraType: threeCamera.type,
+                  domElement: dom?.tagName,
+                  modelId: model.modelId
+                });
+              }
+              
+              // Use ThatOpen's built-in raycast
+              const hit = await model.raycast({ 
+                camera: threeCamera, 
+                mouse: mouseVec,
+                dom: dom
+              });
+              
+              // Debug: Log result for first sample
+              if (firstSample) {
+                console.log('🔬 Raycast result:', {
+                  hit: hit,
+                  hasDistance: hit && typeof hit.distance === 'number',
+                  hitType: typeof hit
+                });
+              }
+              
+              if (hit && typeof hit.distance === 'number') {
+                hitCount++;
+                const localId = (hit as any).localId;
                 
-                if (instanceId !== undefined && instanceId !== null && Number.isInteger(instanceId)) {
-                  const localId = instanceId;
+                console.log('🎯 Hit found:', { 
+                  point: { x, y }, 
+                  mouseNDC: { x: mouseX, y: mouseY },
+                  localId, 
+                  distance: hit.distance,
+                  modelId: model.modelId 
+                });
+                
+                if (localId !== undefined && localId !== null && Number.isInteger(localId)) {
                   if (!selectedMap.has(model.modelId)) {
                     selectedMap.set(model.modelId, new Set());
                   }
@@ -4335,12 +4402,22 @@ const App: React.FC = () => {
                 }
               }
             } catch (error) {
-              // Skip objects that cause raycasting errors (invalid geometry, etc.)
-              console.debug('Skipping object due to raycast error:', error);
+              // Skip objects that cause raycasting errors
+              if (firstSample) {
+                console.warn('❌ Raycast error on first sample:', error);
+              }
+              console.debug('Skipping model due to raycast error:', error);
             }
+          }
+          
+          // Mark that we've processed the first sample
+          if (firstSample) {
+            firstSample = false;
           }
         }
       }
+      
+      console.log('📊 Sampling complete:', { samplePoints, hitCount, uniqueObjects: selectedMap.size });
       
       // Convert to Selection array
       const selections: Selection[] = [];
@@ -4350,7 +4427,16 @@ const App: React.FC = () => {
         }
       }
       
+      console.log('✅ Rectangle Selection Result:', {
+        totalSelected: selections.length,
+        byModel: Array.from(selectedMap.entries()).map(([modelId, ids]) => ({
+          modelId,
+          count: ids.size
+        }))
+      });
+      
       if (selections.length === 0) {
+        console.warn('⚠️ No objects found in rectangle');
         // No selection
         setSelectedItems([]);
         updateSelectedProperties(null);
@@ -4361,8 +4447,12 @@ const App: React.FC = () => {
       const prevSelections = selectedRef.current;
       const selectionChanged = !selectionsMatch(selections, prevSelections);
       
-      if (!selectionChanged) return;
+      if (!selectionChanged) {
+        console.log('ℹ️ Selection unchanged');
+        return;
+      }
       
+      console.log('🔄 Updating selection with', selections.length, 'objects');
       setSelectedItems(selections);
       handleExplorerOpen();
       
@@ -4391,6 +4481,12 @@ const App: React.FC = () => {
       const rect = dom.getBoundingClientRect();
       mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      
+      console.log('🖱️ Click selection:', {
+        viewport: { x: clientX, y: clientY },
+        canvasBounds: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+        mouseNDC: { x: mouse.x, y: mouse.y }
+      });
       let best: { dist: number; model: any; localId: number; point?: THREE.Vector3; object?: any; instanceId?: number } | null = null;
       const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, threeCamera);
@@ -4528,8 +4624,16 @@ const App: React.FC = () => {
       setContextMenu(null);
       if (ev.button !== 0) return; // left button only
       
+      console.log('👆 PointerDown:', { 
+        mode: selectionModeRef.current, 
+        measuring: isMeasuringRef.current,
+        x: ev.clientX, 
+        y: ev.clientY 
+      });
+      
       // Check selection mode
       if (selectionModeRef.current === 'rectangle' && !isMeasuringRef.current) {
+        console.log('🟦 Starting rectangle selection');
         // Start rectangle selection
         isDrawingSelectionRef.current = true;
         selectionStartRef.current = { x: ev.clientX, y: ev.clientY };
@@ -4576,7 +4680,14 @@ const App: React.FC = () => {
     };
     
     const onPointerUp = async (ev: PointerEvent) => {
+      console.log('👆 PointerUp:', { 
+        drawing: isDrawingSelectionRef.current,
+        x: ev.clientX, 
+        y: ev.clientY 
+      });
+      
       if (isDrawingSelectionRef.current && selectionStartRef.current && selectionBoxRef.current) {
+        console.log('🟦 Completing rectangle selection');
         // Complete rectangle selection
         const start = selectionStartRef.current;
         const box = selectionBoxRef.current;
@@ -5001,9 +5112,13 @@ const App: React.FC = () => {
     <div style={{ width: '100%', height: '100%' }}>
       <AppBar position="static">
         <Toolbar>
-          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            BIM Viewer (Preview)
-          </Typography>
+          <Box sx={{ flexGrow: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+            <img 
+              src="/Fragments-AI-viewer/savora-logo.png" 
+              alt="Savora Logo" 
+              style={{ height: '32px' }}
+            />
+          </Box>
           <Tooltip title="Settings">
             <IconButton color="inherit" onClick={handleSettingsOpen} sx={{ mr: 1 }}>
               <SettingsIcon />
@@ -5120,7 +5235,7 @@ const App: React.FC = () => {
         )}
       </div>
 
-      {isExplorerOpen ? (
+      {isExplorerOpen && (
         <Draggable nodeRef={explorerNodeRef} handle=".explorer-header" bounds="parent">
           <Paper
             ref={explorerNodeRef}
@@ -5568,31 +5683,95 @@ const App: React.FC = () => {
             />
           </Paper>
         </Draggable>
-      ) : (
-        <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 90, zIndex: 1700, borderRadius: '50%' }}>
-          <IconButton onClick={handleExplorerOpen} title="Open Model Explorer">
-            <ViewListIcon />
-          </IconButton>
-        </Paper>
       )}
 
-      {/* IDS Checker floating button */}
-      {!isIdsOpen && (
-        <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 150, zIndex: 1700, borderRadius: '50%' }}>
-          <IconButton onClick={openIdsPanel} title="Open IDS Checker">
-            <RuleIcon />
-          </IconButton>
-        </Paper>
-      )}
+      {/* Model Explorer floating button - always visible */}
+      <Paper 
+        elevation={6} 
+        sx={{ 
+          position: 'fixed', 
+          bottom: 20, 
+          right: 90, 
+          zIndex: 1700, 
+          borderRadius: '50%',
+          backgroundColor: isExplorerOpen ? 'primary.main' : 'background.paper',
+          transition: 'background-color 0.2s ease'
+        }}
+      >
+        <IconButton 
+          onClick={toggleExplorerWindow} 
+          title={isExplorerOpen ? 'Close Model Explorer' : 'Open Model Explorer'}
+          sx={{ color: isExplorerOpen ? 'white' : 'inherit' }}
+        >
+          <ViewListIcon />
+        </IconButton>
+      </Paper>
 
-      {/* IDS Creator floating button */}
-      {!isIdsCreatorOpen && (
-        <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, right: 210, zIndex: 1700, borderRadius: '50%' }}>
-          <IconButton onClick={() => setIsIdsCreatorOpen(true)} title="Open IDS Creator">
-            <EditNoteIcon />
-          </IconButton>
-        </Paper>
-      )}
+      {/* Chat floating button - always visible */}
+      <Paper 
+        elevation={6} 
+        sx={{ 
+          position: 'fixed', 
+          bottom: 20, 
+          right: 30, 
+          zIndex: 1700, 
+          borderRadius: '50%',
+          backgroundColor: isChatOpen ? 'primary.main' : 'background.paper',
+          transition: 'background-color 0.2s ease'
+        }}
+      >
+        <IconButton 
+          onClick={toggleChatWindow} 
+          title={isChatOpen ? 'Close AI Assistant' : 'Open AI Assistant'}
+          sx={{ color: isChatOpen ? 'white' : 'inherit' }}
+        >
+          <ChatIcon />
+        </IconButton>
+      </Paper>
+
+      {/* IDS Checker floating button - always visible */}
+      <Paper 
+        elevation={6} 
+        sx={{ 
+          position: 'fixed', 
+          bottom: 20, 
+          right: 150, 
+          zIndex: 1700, 
+          borderRadius: '50%',
+          backgroundColor: isIdsOpen ? 'primary.main' : 'background.paper',
+          transition: 'background-color 0.2s ease'
+        }}
+      >
+        <IconButton 
+          onClick={toggleIdsPanel} 
+          title={isIdsOpen ? 'Close IDS Checker' : 'Open IDS Checker'}
+          sx={{ color: isIdsOpen ? 'white' : 'inherit' }}
+        >
+          <RuleIcon />
+        </IconButton>
+      </Paper>
+
+      {/* IDS Creator floating button - always visible */}
+      <Paper 
+        elevation={6} 
+        sx={{ 
+          position: 'fixed', 
+          bottom: 20, 
+          right: 210, 
+          zIndex: 1700, 
+          borderRadius: '50%',
+          backgroundColor: isIdsCreatorOpen ? 'primary.main' : 'background.paper',
+          transition: 'background-color 0.2s ease'
+        }}
+      >
+        <IconButton 
+          onClick={toggleIdsCreatorPanel} 
+          title={isIdsCreatorOpen ? 'Close IDS Creator' : 'Open IDS Creator'}
+          sx={{ color: isIdsCreatorOpen ? 'white' : 'inherit' }}
+        >
+          <EditNoteIcon />
+        </IconButton>
+      </Paper>
 
       {/* View Controls Toolbar */}
       {isViewToolbarOpen ? (
