@@ -1,4 +1,4 @@
-# Fragments AI Viewer
+# Savora Viewer
 
 A powerful web-based 3D viewer for BIM models with integrated IDS (Information Delivery Specification) validation and AI-powered assistance. Built with React, Vite, Three.js, and That Open Engine libraries, it runs fully in the browser and is optimized for hosting on GitHub Pages.
 
