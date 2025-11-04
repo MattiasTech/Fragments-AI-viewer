@@ -5117,7 +5117,7 @@ const App: React.FC = () => {
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: 'background.paper', p: '4px 8px', borderRadius: 1.5, boxShadow: '0 1px 6px rgba(0,0,0,0.16)' }}>
                 <img
-                  src="/Fragments-AI-viewer/savora-logo.png"
+                  src={import.meta.env.BASE_URL + 'savora-logo.png'}
                   alt="Savora"
                   style={{ height: 28, display: 'block' }}
                 />
@@ -6380,7 +6380,7 @@ const App: React.FC = () => {
           
           <Typography variant="body2" color="text.secondary" paragraph>
             A powerful web-based 3D viewer for Building Information Modeling (BIM) files with integrated IDS validation and AI-powered assistance. Built on That Open Company BIM Toolkit and Three.js. <br />
-            For bug reporting and more information, visit our <Link href="https://github.com/MattiasTech/Fragments-AI-viewer" target="_blank" rel="noopener">website</Link>. <br />
+            For bug reporting and more information, visit our <Link href="https://github.com/savytechlabs/savora-viewer" target="_blank" rel="noopener">website</Link>. <br />
             <span style={{ fontWeight: 'bold' }}>Note: No data is collected or sent to any servers; all processing occurs locally in your browser.</span>
           </Typography>
 

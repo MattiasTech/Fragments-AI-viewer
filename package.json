@@ -1,8 +1,8 @@
 {
-  "name": "fragments-ai-viewer",
+  "name": "savora-viewer",
   "version": "0.2.1",
   "private": true,
-  "homepage": "https://github.com/MattiasTech/Fragments-AI-viewer/",
+  "homepage": "https://savytechlabs.github.io/savora-viewer/",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

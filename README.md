@@ -2,7 +2,7 @@
 
 A powerful web-based 3D viewer for BIM models with integrated IDS (Information Delivery Specification) validation and AI-powered assistance. Built with React, Vite, Three.js, and That Open Engine libraries, it runs fully in the browser and is optimized for hosting on GitHub Pages.
 
-**All data is processed localy in the users browser PC, Phone, Tablet etc. (Exeption AI Chat, sends data to AI provider). NB: If the AI chat is not used no data leavs the users device.** 
+**All data is processed locally in the user's browser (PC, phone, tablet, etc.). Exception: AI Chat sends data to the configured AI provider. If AI Chat is not used, no model data leaves the user's device.** 
 
 
 ## Features
@@ -85,7 +85,7 @@ To use the AI Assistant feature:
 
 1. Get an API key from Google AI.
 2. Configure the API key in your .env
-3. The AI Assistant uses the Gemeni 2.5 light by default. You can modify the model in `ChatWindow.tsx` if needed.
+3. The AI Assistant uses the Gemini 2.5 light by default. You can modify the model in `ChatWindow.tsx` if needed.
 
 ## Usage Guide
 
@@ -201,7 +201,7 @@ npm run preview
 This project is preconfigured to deploy to GitHub Pages using the `gh-pages` branch.
 
 - Vite base path is set to the repo subpath in `vite.config.ts`:
-  - `base: '/Fragments-AI-viewer/'`
+  - `base: '/savora-viewer/'`
 - Web-IFC assets are located at `public/web-ifc/` and are referenced using the Vite base URL at runtime.
 
 Deploy steps:
@@ -219,8 +219,8 @@ npm run deploy
    - Branch: `gh-pages` and Folder: `/ (root)`
 
 4) Your site will be available at:
-   - `https://<your-username>.github.io/Fragments-AI-viewer/`
-   - For this repo: `https://mattiastech.github.io/Fragments-AI-viewer/`
+  - `https://<your-username>.github.io/savora-viewer/`
+  - For this repo: `https://savytechlabs.github.io/savora-viewer/`
 
 Notes:
 - If you fork or rename the repository, update `base` in `vite.config.ts` to match the new repo name, then `npm run build` and `npm run deploy` again.
@@ -236,7 +236,7 @@ Notes:
 
 ### Deployment Issues
 - **404s for CSS/JS on GitHub Pages**:
-  - Ensure `vite.config.ts` has `base: '/Fragments-AI-viewer/'` (exactly matching the repo name) and redeploy.
+  - Ensure `vite.config.ts` has `base: '/savora-viewer/'` (exactly matching the repo name) and redeploy.
   
 - **404 right after deploying**:
   - Pages sometimes takes a minute to publish—wait and hard refresh (Ctrl+F5).

@@ -173,7 +173,11 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
           const processed = processElement(element);
           results.push(processed);
         } catch (error) {
-          console.error(`Failed to process element ${element.globalId}:`, error);
+          // Avoid using a user-dependent string as the format string for
+          // util.format (used by console.* under Node). Construct a constant
+          // format and pass the potentially untrusted value as an argument
+          // so it won't be interpreted as a format string.
+          console.error('Failed to process element %s', element.globalId, error);
           // Continue processing other elements
         }
       }
