@@ -5113,11 +5113,19 @@ const App: React.FC = () => {
       <AppBar position="static">
         <Toolbar>
           <Box sx={{ flexGrow: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-            <img 
-              src="/Fragments-AI-viewer/savora-logo.png" 
-              alt="Savora Logo" 
-              style={{ height: '32px' }}
-            />
+            {/* Logo pill: subtle background, padding and shadow for a polished look */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: 'background.paper', p: '4px 8px', borderRadius: 1.5, boxShadow: '0 1px 6px rgba(0,0,0,0.16)' }}>
+                <img
+                  src="/Fragments-AI-viewer/savora-logo.png"
+                  alt="Savora"
+                  style={{ height: 28, display: 'block' }}
+                />
+              </Box>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, color: 'common.white', ml: 0.5 }}>
+                Core Preview
+              </Typography>
+            </Box>
           </Box>
           <Tooltip title="Settings">
             <IconButton color="inherit" onClick={handleSettingsOpen} sx={{ mr: 1 }}>
