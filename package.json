@@ -2,7 +2,7 @@
   "name": "savora-viewer",
   "version": "0.2.1",
   "private": true,
-  "homepage": "https://savytechlabs.github.io/savora-viewer/",
+  "homepage": "https://savytechlabs.github.io/Savora-Viewer/",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

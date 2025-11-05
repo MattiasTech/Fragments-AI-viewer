@@ -5123,7 +5123,7 @@ const App: React.FC = () => {
                 />
               </Box>
               <Typography variant="subtitle1" sx={{ fontWeight: 700, color: 'common.white', ml: 0.5 }}>
-                Core Preview
+                Core (Preview)
               </Typography>
             </Box>
           </Box>
