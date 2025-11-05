@@ -559,8 +559,6 @@ const collectElementsDirect = async (
   globalIds: string[],
   options?: CollectElementsOptions
 ): Promise<ElementData[]> => {
-  console.log('🔍 [collectElementsDirect] START with', globalIds.length, 'globalIds');
-  console.log('🔍 [collectElementsDirect] Has getElementProps?', !!viewerApi.getElementProps);
   
   const elements: ElementData[] = [];
   const total = Math.max(globalIds.length, 1);
@@ -568,7 +566,6 @@ const collectElementsDirect = async (
   
   // Use getElementProps for each GlobalId (this should already be on-demand if implemented correctly)
   const useElementPropsMethod = viewerApi.getElementProps;
-  console.log('🔍 [collectElementsDirect] Using getElementProps method');
   
   for (let i = 0; i < globalIds.length; i++) {
     const globalId = globalIds[i];
@@ -602,7 +599,6 @@ const collectElementsDirect = async (
     }
   }
   options?.onProgress?.({ done: elements.length, total });
-  console.log('🔍 [collectElementsDirect] COMPLETE - returning', elements.length, 'elements');
   return elements;
 };
 
@@ -617,7 +613,6 @@ const buildWithWorker = async (
 
   // Calculate optimal worker count (leave one core for UI)
   const workerCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
-  console.log(`🚀 Starting parallel property extraction with ${workerCount} workers`);
   
   // Create worker pool
   const workers: Worker[] = [];
@@ -706,7 +701,6 @@ const buildWithWorker = async (
     // Combine results from all workers
     const elements = allResults.flat();
     
-    console.log(`✅ Parallel processing complete: ${elements.length} elements processed by ${workerCount} workers`);
     options?.onProgress?.({ done: elements.length, total: Math.max(total, elements.length) });
     return elements;
   } finally {
@@ -729,110 +723,75 @@ export const collectElementsForIds = async (
   viewerApi: ViewerApi,
   options?: CollectElementsOptions & { filterGlobalIds?: string[] } // Add optional filter
 ): Promise<ElementData[]> => {
-  console.log('🔍 [collectElementsForIds] START', { 
-    hasFilterGlobalIds: !!options?.filterGlobalIds, 
-    filterCount: options?.filterGlobalIds?.length 
-  });
   
   if (!viewerApi) {
-    console.log('🔍 [collectElementsForIds] No viewerApi');
     return [];
   }
   
   // OPTIMIZATION: If we have filterGlobalIds, use them directly - no need to get all IDs!
   let globalIds: string[];
   if (options?.filterGlobalIds && options.filterGlobalIds.length > 0) {
-    console.log('🔍 [collectElementsForIds] Using provided filterGlobalIds directly (skipping listGlobalIds)');
     globalIds = options.filterGlobalIds;
   } else {
     // Get all global IDs first (only when validating entire model)
-    console.log('🔍 [collectElementsForIds] Calling listGlobalIds...');
     const allGlobalIds = await viewerApi.listGlobalIds();
-    console.log('🔍 [collectElementsForIds] Got all GlobalIds:', allGlobalIds.length);
     globalIds = allGlobalIds;
   }
   
-  console.log('🔍 [collectElementsForIds] GlobalIds to validate:', globalIds.length);
   
   if (!globalIds.length) {
-    console.log('🔍 [collectElementsForIds] No GlobalIds to process');
     cachedElements = null;
     return [];
   }
   
-  console.log('🔍 [collectElementsForIds] Building cache token...');
   const token = buildCacheToken(globalIds);
-  console.log('🔍 [collectElementsForIds] Token built:', token.substring(0, 20) + '...');
   
   const expectedTotal = Math.max(globalIds.length, 1);
   options?.onPhase?.('BUILDING_PROPERTIES');
   options?.onProgress?.({ done: 0, total: expectedTotal });
   
   // Check if we have cached data for this exact set of elements
-  console.log('🔍 [collectElementsForIds] Checking memory cache...');
   if (cachedElements && cachedElements.token === token) {
-    console.log('🔍 [collectElementsForIds] Memory cache HIT! Returning', cachedElements.elements.length, 'elements');
     return cachedElements.elements;
   }
-  console.log('🔍 [collectElementsForIds] Memory cache MISS');
   
   // Skip persistent cache for filtered queries (small element sets don't benefit from caching)
   const isFiltering = options?.filterGlobalIds && options.filterGlobalIds.length > 0;
   let persistentKey: string | null = null;
   
   if (!isFiltering) {
-    console.log('🔍 [collectElementsForIds] Resolving persistent key...');
     persistentKey = await resolvePersistentKey(token, viewerApi);
-    console.log('🔍 [collectElementsForIds] Persistent key:', persistentKey);
     
     if (persistentKey) {
-      console.log('🔍 [collectElementsForIds] Checking IndexedDB cache...');
       try {
         const stored = await idsDb.get(persistentKey);
-        console.log('🔍 [collectElementsForIds] IndexedDB returned:', stored?.length || 0, 'elements');
         if (stored && stored.length) {
           const metadata = await idsDb.getMetadata(persistentKey);
           const cacheAge = metadata ? Math.round((Date.now() - metadata.timestamp) / 1000 / 60) : 0;
-          console.log(`⚡ Using cached elements from IndexedDB: ${stored.length} elements (cached ${cacheAge} minutes ago)`);
           options?.onProgress?.({ done: stored.length, total: expectedTotal });
           cachedElements = { token, elements: stored };
           return stored;
         }
-        console.log('🔍 [collectElementsForIds] IndexedDB cache MISS or empty');
       } catch (error) {
         console.warn('IDS adapter: failed to read cached elements from IndexedDB', error);
       }
     }
   } else {
-    console.log('🔍 [collectElementsForIds] Skipping persistent cache (filtering mode)');
   }
 
   let elements: ElementData[] = [];
   
-  console.log('🔍 [collectElementsForIds] Decision point:', { 
-    isFiltering, 
-    willUseDirect: isFiltering,
-    globalIdsCount: globalIds.length 
-  });
   
   if (isFiltering) {
-    console.log(`📌 Filtering mode: collecting ${globalIds.length} specific elements directly`);
-    console.log('🔍 [collectElementsForIds] Calling collectElementsDirect...');
     elements = await collectElementsDirect(viewerApi, globalIds, options);
-    console.log('🔍 [collectElementsForIds] collectElementsDirect returned:', elements.length, 'elements');
   } else {
-    console.log('🔍 [collectElementsForIds] Full model mode - using workers');
     // For full model validation, use parallel workers
     const total = typeof viewerApi.countElements === 'function' ? await viewerApi.countElements().catch(() => globalIds.length) : globalIds.length;
-    console.log('🔍 [collectElementsForIds] Total elements:', total);
 
     if (typeof viewerApi.iterElements === 'function') {
       try {
-        console.log('🔍 [collectElementsForIds] Calling buildWithWorker...');
         elements = await buildWithWorker(viewerApi, total ?? globalIds.length, options);
-        console.log('🔍 [collectElementsForIds] buildWithWorker returned:', elements.length, 'elements');
         if (!elements.length) {
-          console.log('🔍 [collectElementsForIds] No elements from worker, falling back to direct');
           elements = await collectElementsDirect(viewerApi, globalIds, options);
         }
       } catch (error) {
@@ -840,7 +799,6 @@ export const collectElementsForIds = async (
     elements = await collectElementsDirect(viewerApi, globalIds, options);
       }
     } else {
-      console.log('🔍 [collectElementsForIds] iterElements not available, using direct');
       elements = await collectElementsDirect(viewerApi, globalIds, options);
     }
   }
@@ -865,7 +823,6 @@ export const buildAndPersistCache = async (
   globalIds: string[],
   options?: CollectElementsOptions
 ): Promise<ElementData[]> => {
-  console.log('🔧 [buildAndPersistCache] START', { count: globalIds.length });
   if (!viewerApi) return [];
   // If viewerApi supports iterElements, prefer worker-based full extraction to speed up large builds
   if (typeof viewerApi.iterElements === 'function') {
@@ -888,7 +845,6 @@ export const buildAndPersistCache = async (
             }
           }
           cachedElements = { token, elements };
-          console.log(`🔧 [buildAndPersistCache] Persisted ${elements.length} elements to IndexedDB key=${persistentKey.substring(0,16)}...`);
         }
       } catch (err) {
         console.warn('🔧 [buildAndPersistCache] Failed to compute key/persist', err);
@@ -908,7 +864,6 @@ export const buildAndPersistCache = async (
     if (persistentKey && elements.length) {
       await idsDb.set(persistentKey, elements);
       cachedElements = { token, elements };
-      console.log(`🔧 [buildAndPersistCache] Persisted ${elements.length} elements to IndexedDB key=${persistentKey.substring(0,16)}...`);
     }
   } catch (error) {
     console.warn('🔧 [buildAndPersistCache] Failed to persist cache', error);
@@ -1148,23 +1103,18 @@ export const extractPropertiesIncremental = async (
     batchSize?: number; // Elements per batch (default 2000 for faster processing)
   }
 ): Promise<ElementData[]> => {
-  console.log('🚀 [extractPropertiesIncremental] START', { batchSize: options?.batchSize, ifcTypes: options?.ifcTypes });
   
   const batchSize = options?.batchSize ?? 2000;
   const ifcFilter = options?.ifcTypes && options.ifcTypes.length > 0 ? options.ifcTypes : null;
   
-  console.log('📝 [extractPropertiesIncremental] Configuration:', { batchSize, ifcFilter });
   
   onProgress?.({ done: 0, total: undefined, phase: 'Checking model signature...' });
   
   // Get current model signature
-  console.log('🔍 [extractPropertiesIncremental] Getting model signature...');
   let currentSignature: { signature: string; elementCount: number; modelFiles: Array<{ id: string; name: string }> } | null = null;
   try {
     if (typeof viewerApi.getModelSignature === 'function') {
-      console.log('📞 [extractPropertiesIncremental] Calling viewerApi.getModelSignature()...');
       currentSignature = await viewerApi.getModelSignature();
-      console.log('✅ [extractPropertiesIncremental] Got signature:', currentSignature);
     } else {
       console.warn('⚠️ [extractPropertiesIncremental] getModelSignature not available on viewerApi');
     }
@@ -1177,27 +1127,21 @@ export const extractPropertiesIncremental = async (
     return [];
   }
   
-  console.log('🔑 [extractPropertiesIncremental] Computing storage key...');
   // Compute storage key
   const persistentKey = await computeModelKey({ 
     modelUrl: currentSignature.signature, 
     extra: String(currentSignature.elementCount) 
   });
-  console.log('🔑 [extractPropertiesIncremental] Storage key:', persistentKey.substring(0, 20) + '...');
   
   // Check if signature matches (cache still valid)
-  console.log('🔍 [extractPropertiesIncremental] Checking if signature is valid...');
   const signatureValid = await idsDb.isSignatureValid(persistentKey, currentSignature.signature);
-  console.log('🔍 [extractPropertiesIncremental] Signature valid:', signatureValid);
   
   if (signatureValid) {
-    console.log('⚡ [extractPropertiesIncremental] Cache is valid, reading cached data...');
     onProgress?.({ done: 0, total: currentSignature.elementCount, phase: 'Using cached data (model unchanged)' });
     // Read cached data
     try {
       const cached = await idsDb.readAllParts(persistentKey);
       if (cached && cached.length > 0) {
-        console.log(`✅ [extractPropertiesIncremental] Using cached properties: ${cached.length} elements (signature valid)`);
         onProgress?.({ done: cached.length, total: currentSignature.elementCount, phase: 'Cache loaded' });
         return cached;
       } else {
@@ -1207,29 +1151,24 @@ export const extractPropertiesIncremental = async (
       console.warn('⚠️ [extractPropertiesIncremental] Failed to read cached data, will rebuild', error);
     }
   } else {
-    console.log('🔄 [extractPropertiesIncremental] Model signature changed or no cache - extracting properties...');
     // Clear old cache for this key
     try {
       await idsDb.removeParts(persistentKey);
-      console.log('🗑️ [extractPropertiesIncremental] Cleared old cache parts');
     } catch (error) {
       console.warn('⚠️ [extractPropertiesIncremental] Failed to remove old parts', error);
     }
   }
   
   // Extract properties using iterElements
-  console.log('🔍 [extractPropertiesIncremental] Checking if iterElements is available...');
   if (typeof viewerApi.iterElements !== 'function') {
     console.error('❌ [extractPropertiesIncremental] iterElements not available');
     throw new Error('extractPropertiesIncremental: iterElements not available');
   }
-  console.log('✅ [extractPropertiesIncremental] iterElements is available');
   
   onProgress?.({ done: 0, total: currentSignature.elementCount, phase: 'Extracting properties...' });
   
   // Worker pool for parallel extraction
   const workerCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
-  console.log(`👷 [extractPropertiesIncremental] Creating worker pool with ${workerCount} workers...`);
   const workers: Worker[] = [];
   let done = 0;
   let partIndex = 0;
@@ -1238,11 +1177,9 @@ export const extractPropertiesIncremental = async (
   try {
     // Create worker pool
     for (let i = 0; i < workerCount; i++) {
-      console.log(`👷 [extractPropertiesIncremental] Creating worker ${i + 1}/${workerCount}...`);
       const worker = new Worker(new URL('../workers/buildProps.worker.ts', import.meta.url), { type: 'module' });
       workers.push(worker);
     }
-    console.log(`✅ [extractPropertiesIncremental] Worker pool created with ${workers.length} workers`);
     
     // Attach message handlers
     const handlers: Array<(ev: MessageEvent) => void> = [];
@@ -1274,7 +1211,6 @@ export const extractPropertiesIncremental = async (
                 
                 // Log progress every 5000 elements
                 if (done % 5000 < filtered.length || done === filtered.length) {
-                  console.log(`💾 [extractPropertiesIncremental] Saved ${done.toLocaleString()} elements...`);
                 }
                 
                 onProgress?.({ 
@@ -1292,10 +1228,8 @@ export const extractPropertiesIncremental = async (
       handlers.push(handler);
       worker.addEventListener('message', handler);
     });
-    console.log(`✅ [extractPropertiesIncremental] ${workers.length} workers ready`);
     
     // Distribute batches from iterElements
-    console.log('🔄 [extractPropertiesIncremental] Starting to iterate elements...');
     let workerIndex = 0;
     let batchBuffer: Array<{ globalId: string; ifcClass?: string; data: Record<string, unknown> }> = [];
     let iterationCount = 0;
@@ -1305,7 +1239,6 @@ export const extractPropertiesIncremental = async (
       iterationCount++;
       
       if (abortSignal?.aborted) {
-        console.log('🛑 [extractPropertiesIncremental] Aborted by user');
         break;
       }
       if (!Array.isArray(batch) || !batch.length) {
@@ -1340,49 +1273,37 @@ export const extractPropertiesIncremental = async (
           
           // Log progress every 10000 elements
           if (totalProcessed % 10000 === 0) {
-            console.log(`📊 [extractPropertiesIncremental] Processed ${totalProcessed} elements...`);
           }
         }
       }
     }
     
-    console.log(`✅ [extractPropertiesIncremental] Finished iterating: ${totalProcessed} elements in ${iterationCount} batches`);
     
     // Send remaining buffer
     if (batchBuffer.length > 0) {
-      console.log(`📤 [extractPropertiesIncremental] Sending final batch of ${batchBuffer.length} elements to worker ${workerIndex}...`);
       const target = workers[workerIndex];
       target.postMessage({ type: 'build-props', elements: batchBuffer, partIndex: partIndex + 1 } as any);
     }
     
     // Signal finalize
-    console.log(`🏁 [extractPropertiesIncremental] Signaling workers to finalize...`);
     workers.forEach((w, idx) => {
-      console.log(`🏁 [extractPropertiesIncremental] Sending finalize to worker ${idx}...`);
       w.postMessage({ type: 'build-props', final: true } as any);
     });
     
     // Wait for workers to finish
-    console.log('⏳ [extractPropertiesIncremental] Waiting for workers to finish (500ms grace period)...');
     await new Promise((resolve) => setTimeout(resolve, 500));
-    console.log(`✅ [extractPropertiesIncremental] Workers finished. Total extracted: ${done}`);
     
     // Update signature in metadata
-    console.log('💾 [extractPropertiesIncremental] Updating signature in metadata...');
     await idsDb.updateSignature(persistentKey, currentSignature.signature, currentSignature.modelFiles);
-    console.log('✅ [extractPropertiesIncremental] Signature updated');
     
     onProgress?.({ done, total: currentSignature.elementCount, phase: 'Extraction complete' });
     
-    console.log(`✅ [extractPropertiesIncremental] COMPLETE: Extracted ${done} elements to IndexedDB`);
     return allExtracted;
     
   } finally {
     // Cleanup workers
-    console.log('🧹 [extractPropertiesIncremental] Cleaning up workers...');
     workers.forEach((w, idx) => {
       try { 
-        console.log(`🧹 [extractPropertiesIncremental] Terminating worker ${idx}...`);
         w.postMessage({ type: 'cancel' } as any); 
       } catch (e) {
         console.warn(`⚠️ [extractPropertiesIncremental] Failed to send cancel to worker ${idx}`, e);
@@ -1393,7 +1314,6 @@ export const extractPropertiesIncremental = async (
         console.warn(`⚠️ [extractPropertiesIncremental] Failed to terminate worker ${idx}`, e);
       }
     });
-    console.log('✅ [extractPropertiesIncremental] Workers cleaned up');
   }
 };
 

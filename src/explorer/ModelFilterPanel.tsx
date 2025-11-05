@@ -198,7 +198,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
     if (!viewerApi || !viewerApi.getItemsByCategory || !viewerApi.getItemsDataByModel) return;
     
     setDiscoveringProperties(true);
-    console.log('🔍 [Property Discovery] START');
     
     try {
       // Get sample elements from selected categories (or all if none selected)
@@ -211,15 +210,12 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       // Take up to 10 sample elements from the first model
       const [modelId, localIds] = Object.entries(categoryMap)[0] || [null, []];
       if (!modelId || localIds.length === 0) {
-        console.log('🔍 [Property Discovery] No elements found');
         setAvailableProperties([]);
         return;
       }
       
       const sampleSize = Math.min(10, localIds.length);
       const sampleIds = localIds.slice(0, sampleSize);
-      
-      console.log(`🔍 [Property Discovery] Sampling ${sampleSize} elements from model ${modelId}`);
       
       // Fetch with full relations using the ViewerApi method (ThatOpen pattern)
       const config: ItemsDataConfig = {
@@ -233,7 +229,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       };
       
       const sampleData = await viewerApi.getItemsDataByModel(modelId, sampleIds, config);
-      console.log(`✅ [Property Discovery] Loaded ${sampleData.length} samples`);
       
       // Collect all unique property paths
       const pathSet = new Set<string>();
@@ -252,7 +247,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
         .filter(p => !p.startsWith('_')) // Remove internal fields
         .sort();
       
-      console.log(`✅ [Property Discovery] Found ${sortedPaths.length} unique properties`);
       setAvailableProperties(sortedPaths);
       
     } catch (error: any) {
@@ -287,7 +281,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
     
     try {
       // Step 1: Get items by category (fast - no property loading)
-      console.log('🔍 [Filter] Step 1: Getting items by category...');
       let categoryMap: Record<string, number[]>;
       
       if (selectedIfcTypes.length > 0) {
@@ -301,7 +294,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       
       // Count total items
       const totalItems = Object.values(categoryMap).reduce((sum, ids) => sum + ids.length, 0);
-      console.log(`🔍 [Filter] Found ${totalItems} items to check`);
       
       if (totalItems === 0) {
         alert('⚠️ No elements found matching the category filter');
@@ -310,7 +302,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       }
       
       // Step 2: Load properties on-demand and filter (only filtered elements!)
-      console.log('🔍 [Filter] Step 2: Loading properties for', totalItems, 'filtered elements...');
       let processed = 0;
       
       // Configure what relations to load (ThatOpen pattern)
@@ -332,7 +323,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       for (const [modelId, localIds] of Object.entries(categoryMap)) {
         if (localIds.length === 0) continue;
         
-        console.log(`🔍 [Filter] Processing model ${modelId}: ${localIds.length} elements`);
         
         // Use ViewerApi method to get items data
         if (!viewerApi.getItemsDataByModel) {
@@ -342,7 +332,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
         
         // Fetch data for just these local IDs
         const itemsData = await viewerApi.getItemsDataByModel(modelId, localIds, config);
-        console.log(`✅ [Filter] Loaded ${itemsData.length} items from model ${modelId}`);
         
         // Filter and collect matching GlobalIds
         let debugCount = 0;
@@ -352,19 +341,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
           
           // Test the filter condition
           const actualValue = getValueByPath(item, field);
-          
-          // Debug first 5 items to see what values we're getting
-          if (debugCount < 5) {
-            console.log(`🔍 [Filter Debug] Item ${debugCount + 1}:`, {
-              globalId,
-              field,
-              actualValue,
-              operator,
-              expectedValue: value,
-              matches: testOperator(actualValue, operator, value)
-            });
-            debugCount++;
-          }
           
           if (testOperator(actualValue, operator, value)) {
             matchingGlobalIds.push(globalId);
@@ -377,7 +353,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
         }
       }
       
-      console.log(`✅ [Filter] Complete: ${matchingGlobalIds.length} matches out of ${totalItems} elements`);
       setResultIds(matchingGlobalIds);
       setResultSummary(`${matchingGlobalIds.length} of ${totalItems} elements`);
       
@@ -403,7 +378,6 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       if (!viewerApi || !resultIds || resultIds.length === 0 || filtering) return;
       
       try {
-        console.log(`[Filter] Applying ${filterMode} mode...`);
         
         // Clear previous colors and isolation
         if (viewerApi.clearColors) {
@@ -416,22 +390,19 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
         // Apply the selected mode
         if (filterMode === 'ghost') {
           // Ghost mode: make non-matching elements transparent
-          if (viewerApi.ghost) {
+          if (typeof viewerApi.ghost === 'function') {
             await viewerApi.ghost(resultIds);
-            console.log('[Filter] Applied ghost mode');
           } else {
             console.warn('Ghost mode not supported by viewer API');
           }
         } else {
           // Isolate mode: hide non-matching elements
           await viewerApi.isolate(resultIds);
-          console.log('[Filter] Applied isolate mode');
         }
         
         // Fit view to matching elements
         if (typeof viewerApi.fitViewTo === 'function') {
           await viewerApi.fitViewTo(resultIds);
-          console.log('[Filter] Fitted view to filtered elements');
         }
         
         if (mounted) {
@@ -457,19 +428,16 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       // Clear isolation (unhide all elements)
       if (viewerApi.clearIsolation) {
         await viewerApi.clearIsolation();
-        console.log('🔄 [Filter] Cleared isolation');
       }
       
       // Clear colors
       if (viewerApi.clearColors) {
         await viewerApi.clearColors();
-        console.log('🔄 [Filter] Cleared colors');
       }
       
       setFilterActive(false);
       setResultIds([]);
       setResultSummary('');
-      console.log('✅ [Filter] Filter cleared');
     } catch (error) {
       console.error('❌ [Filter] Failed to clear filter:', error);
     }

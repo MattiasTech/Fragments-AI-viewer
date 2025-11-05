@@ -1048,7 +1048,6 @@ const App: React.FC = () => {
           return;
         }
         if (!localIds.length) {
-          console.info('Model has no local IDs to dump.');
           return;
         }
         const toProcess = typeof sample === 'number' && sample > 0 ? localIds.slice(0, sample) : localIds.slice();
@@ -1066,7 +1065,6 @@ const App: React.FC = () => {
           chunk.forEach((localId, i) => out.push({ localId, data: batch?.[i] ?? null }));
           await new Promise((r) => setTimeout(r, 0));
         }
-        console.info(`Dumped ${out.length} items for model ${id} (sample=${sample ?? 'all'})`);
         const payload = {
           modelId: id,
           label: models.find((m) => m.id === id)?.label ?? id,
@@ -1200,7 +1198,6 @@ const App: React.FC = () => {
                     }}>Build cache</Button>
 
   // inspectModelProperties stats available in variable 'stats'
-        console.log('inspectModelProperties examples (up to 6):', examples);
         const foundAnyPset = Object.keys(stats).some((k) => /pset|HasProperties|PropertySet|IfcPropertySingleValue/i.test(k));
         if (!foundAnyPset) {
           console.warn(
@@ -1281,6 +1278,20 @@ const App: React.FC = () => {
   
   // Selection mode state
   const [selectionMode, setSelectionMode] = useState<'click' | 'rectangle'>('click');
+  const [isGhostMode, setIsGhostMode] = useState(false);
+  const [isIsolateMode, setIsIsolateMode] = useState(false);
+  
+  // Ghost mode (View Controls): use ref to ensure click handler always has current value
+  const isGhostModeRef = useRef(false);
+  // Ghost mode (View Controls): store original material colors
+  const originalColorsRef = useRef<Map<any, { color: number; transparent: boolean; opacity: number }>>(new Map());
+  // Ghost mode (View Controls): store the selection snapshot when ghost mode was enabled
+  const ghostModeSelectionRef = useRef<Record<string, Set<number>> | null>(null);
+  
+  // Filter ghost mode: track state to prevent highlighter interference
+  const isFilterGhostModeRef = useRef(false);
+  // Filter ghost mode: store original material colors
+  const filterGhostOriginalColorsRef = useRef<Map<any, { color: number; transparent: boolean; opacity: number }>>(new Map());
   const [idsExpandSignal, setIdsExpandSignal] = useState(0);
   const [isIdsCreatorOpen, setIsIdsCreatorOpen] = useState(false);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
@@ -1874,45 +1885,35 @@ const App: React.FC = () => {
     elementCount: number;
     modelFiles: Array<{ id: string; name: string }>;
   }> => {
-    console.log('🔑 [computeModelSignature] START');
     const fragments = fragmentsRef.current;
     
     if (!fragments || fragments.list.size === 0) {
-      console.log('⚠️ [computeModelSignature] No fragments available');
       return { signature: 'empty', elementCount: 0, modelFiles: [] };
     }
 
-    console.log(`📊 [computeModelSignature] Found ${fragments.list.size} models in fragments`);
 
     // Collect model IDs sorted
     const modelIds = Array.from(fragments.list.keys()).sort();
-    console.log('🔑 [computeModelSignature] Model IDs:', modelIds);
     
     // Collect model names from the models state
     const modelFiles = models.map(m => ({ id: m.id, name: m.label }));
-    console.log('📁 [computeModelSignature] Model files:', modelFiles);
     
     // Count total elements across all models
-    console.log('🔢 [computeModelSignature] Counting elements across all models...');
     let totalElements = 0;
     for (const [modelId, model] of fragments.list) {
-      console.log(`🔍 [computeModelSignature] Getting local IDs for model ${modelId}...`);
       try {
         const fetched = await model.getLocalIds();
-        console.log(`✅ [computeModelSignature] Got local IDs for model ${modelId}, type:`, typeof fetched);
         const localIds = Array.isArray(fetched) 
           ? fetched 
           : (fetched && typeof (fetched as any)[Symbol.iterator] === 'function')
             ? Array.from(fetched as Iterable<number>)
             : [];
-        console.log(`📊 [computeModelSignature] Model ${modelId} has ${localIds.length} elements`);
         totalElements += localIds.length;
       } catch (error) {
         console.error(`❌ [computeModelSignature] Failed to count elements in model ${modelId}`, error);
       }
     }
 
-    console.log(`📊 [computeModelSignature] Total elements across all models: ${totalElements}`);
 
     // Build signature: modelIds + names + element count
     const parts = [
@@ -1922,7 +1923,6 @@ const App: React.FC = () => {
     ];
     const signature = parts.join('|');
     
-    console.log('🔑 [computeModelSignature] Generated signature (first 100 chars):', signature.substring(0, 100));
 
     const result = {
       signature,
@@ -1930,7 +1930,6 @@ const App: React.FC = () => {
       modelFiles
     };
     
-    console.log('✅ [computeModelSignature] COMPLETE:', result);
     return result;
   }, [models]);
 
@@ -2048,8 +2047,6 @@ const App: React.FC = () => {
     async (globalIds: string[]) => {
       const grouped = new Map<string, number[]>();
       
-      console.log(`🔍 [groupLocalIdsByModel] Grouping ${globalIds.length} GlobalIds using ThatOpen API...`);
-      
       const fragments = fragmentsRef.current;
       if (!fragments) {
         console.error(`🔍 [groupLocalIdsByModel] Fragments not available`);
@@ -2079,7 +2076,6 @@ const App: React.FC = () => {
         }
       }
       
-      console.log(`🔍 [groupLocalIdsByModel] Grouped ${globalIds.length} GlobalIds into ${grouped.size} models (${Array.from(grouped.values()).reduce((sum, arr) => sum + arr.length, 0)} total local IDs)`);
       return { grouped, cache: idsCacheRef.current };
     },
     [] // No dependencies - uses fragmentsRef directly
@@ -2092,11 +2088,9 @@ const App: React.FC = () => {
     },
     getSelectedGlobalIds: async () => {
       // Get currently selected element global IDs directly from fragments
-      console.log('📍 getSelectedGlobalIds called, selectedRef.current:', selectedRef.current);
       const selection = selectedRef.current; // Use the ref to get latest selection
       
       if (!selection || selection.length === 0) {
-        console.log('📍 No selection found');
         return []; // No selection
       }
       
@@ -2106,7 +2100,6 @@ const App: React.FC = () => {
         return [];
       }
       
-      console.log('📍 Processing selection:', selection);
       // Fetch GlobalId directly from each selected element
       const selectedGlobalIds: string[] = [];
       for (const item of selection) {
@@ -2123,7 +2116,6 @@ const App: React.FC = () => {
             const globalId = findFirstValueByKeywords(data, ['globalid', 'global id', 'guid']);
             if (globalId && typeof globalId === 'string') {
               selectedGlobalIds.push(globalId);
-              console.log('📍 Found GlobalId for item:', item, '→', globalId);
             } else {
               console.warn('📍 No GlobalId found in data for item:', item);
             }
@@ -2133,12 +2125,10 @@ const App: React.FC = () => {
         }
       }
       
-      console.log('📍 Final selectedGlobalIds:', selectedGlobalIds);
       return selectedGlobalIds;
     },
     getVisibleGlobalIds: async () => {
       // Get all visible elements from all models using ThatOpen API
-      console.log('👁️ getVisibleGlobalIds called');
       
       const fragments = fragmentsRef.current;
       if (!fragments) {
@@ -2150,11 +2140,9 @@ const App: React.FC = () => {
       
       for (const [modelId, model] of fragments.list) {
         try {
-          console.log(`👁️ Getting visible elements from model: ${modelId}`);
           
           // Get local IDs of visible elements
           const visibleLocalIds = await model.getItemsByVisibility(true);
-          console.log(`👁️ Model ${modelId}: ${visibleLocalIds.length} visible elements`);
           
           if (visibleLocalIds.length === 0) continue;
           
@@ -2185,11 +2173,9 @@ const App: React.FC = () => {
         }
       }
       
-      console.log(`👁️ Total visible GlobalIds: ${visibleGlobalIds.length}`);
       return visibleGlobalIds;
     },
     getElementProps: async (globalId: string) => {
-      console.log('🔍 [getElementProps] START for', globalId);
       // Truly on-demand: fetch properties directly without cache
       const fragments = fragmentsRef.current;
       if (!fragments) {
@@ -2197,7 +2183,6 @@ const App: React.FC = () => {
       }
       
       // Find which model contains this GlobalId
-      console.log('🔍 [getElementProps] Searching across', fragments.list.size, 'models');
       for (const [modelId, model] of fragments.list) {
         try {
           // Convert GlobalId to local ID
@@ -2205,7 +2190,6 @@ const App: React.FC = () => {
           const localId = localIds[0];
           
           if (localId !== null && localId !== undefined) {
-            console.log(`🔍 [getElementProps] Found in model ${modelId}, localId: ${localId}`);
             
             // Fetch data on-demand with full relations
             const [data] = await model.getItemsData([localId], FRAGMENTS_ITEM_DATA_OPTIONS);
@@ -2215,18 +2199,15 @@ const App: React.FC = () => {
               continue;
             }
             
-            console.log('🔍 [getElementProps] Got data, extracting properties...');
             
             // Extract IFC class
             const ifcClass = extractIfcClassFromData(data);
-            console.log('🔍 [getElementProps] ifcClass:', ifcClass);
             
             const psets: Record<string, Record<string, unknown>> = {};
             const attributes: Record<string, unknown> = {};
             
             // Extract property sets
             const propertyRows = collectIfcPropertySetRows(data);
-            console.log('🔍 [getElementProps] Got', propertyRows.length, 'property rows');
             
             propertyRows.forEach((row) => {
               const labelParts = row.label.split('/').map((part: string) => part.trim());
@@ -2253,7 +2234,6 @@ const App: React.FC = () => {
             const typeValue = findFirstValueByKeywords(data, ['type', 'typename']);
             if (typeValue) attributes.Type = typeValue;
             
-            console.log(`🔍 [getElementProps] SUCCESS: ${Object.keys(psets).length} psets, ${Object.keys(attributes).length} attributes`);
             return { ifcClass, psets, attributes };
           }
         } catch (error) {
@@ -2267,13 +2247,10 @@ const App: React.FC = () => {
       throw new Error(`Element with GlobalId ${globalId} is not available.`);
     },
     getElementPropsFast: async (globalId: string) => {
-      console.log('🔍 [getElementPropsFast] START for', globalId);
       // Fast path: get properties directly from selectedRef without building full cache
       const selection = selectedRef.current;
       const fragments = fragmentsRef.current;
       
-      console.log('🔍 [getElementPropsFast] Selection:', selection);
-      console.log('🔍 [getElementPropsFast] Fragments available:', !!fragments);
       
       if (!fragments) {
         console.error('🔍 [getElementPropsFast] Fragments not available!');
@@ -2281,44 +2258,29 @@ const App: React.FC = () => {
       }
       
       // Find the element in current selection first (most likely case for filtered validation)
-      console.log('🔍 [getElementPropsFast] Searching in', selection.length, 'selected items');
       for (let i = 0; i < selection.length; i++) {
         const item = selection[i];
-        console.log(`🔍 [getElementPropsFast] Checking item ${i + 1}/${selection.length}:`, item);
         const model = fragments.list.get(item.modelId);
         if (!model) {
-          console.log(`🔍 [getElementPropsFast] Model not found for ${item.modelId}`);
           continue;
         }
         
         try {
-          console.log(`🔍 [getElementPropsFast] Calling getItemsData for localId ${item.localId}...`);
           const [data] = await model.getItemsData([item.localId], FRAGMENTS_ITEM_DATA_OPTIONS);
-          console.log('🔍 [getElementPropsFast] Got data:', !!data);
           
           if (data) {
-            console.log('🔍 [getElementPropsFast] Data keys:', Object.keys(data));
-            console.log('🔍 [getElementPropsFast] data._category:', data._category);
-            console.log('🔍 [getElementPropsFast] data.ifcClass:', data.ifcClass);
-            console.log('🔍 [getElementPropsFast] data.type:', data.type);
-            console.log('🔍 [getElementPropsFast] data.constructor.name:', data.constructor?.name);
             
             const elementGlobalId = findFirstValueByKeywords(data, ['globalid', 'global id', 'guid']);
-            console.log(`🔍 [getElementPropsFast] Element GlobalId: ${elementGlobalId}, looking for: ${globalId}`);
             
             if (elementGlobalId === globalId) {
-              console.log('🔍 [getElementPropsFast] MATCH! Extracting properties...');
               // Found it! Extract properties directly using the same logic as cache building
               const ifcClass = extractIfcClassFromData(data);
-              console.log('🔍 [getElementPropsFast] ifcClass extracted:', ifcClass);
               
               const psets: Record<string, Record<string, unknown>> = {};
               const attributes: Record<string, unknown> = {};
               
-              console.log('🔍 [getElementPropsFast] Calling collectIfcPropertySetRows...');
               // Extract property sets
               const propertyRows = collectIfcPropertySetRows(data);
-              console.log('🔍 [getElementPropsFast] Got', propertyRows.length, 'property rows');
               
               propertyRows.forEach((row) => {
                 const labelParts = row.label.split('/').map((part) => part.trim());
@@ -2335,7 +2297,6 @@ const App: React.FC = () => {
                 }
               });
               
-              console.log('🔍 [getElementPropsFast] Extracted', Object.keys(psets).length, 'psets');
               
               // Extract basic attributes
               attributes.ifcClass = ifcClass;
@@ -2347,8 +2308,6 @@ const App: React.FC = () => {
               const typeValue = findFirstValueByKeywords(data, ['type', 'typename']);
               if (typeValue) attributes.Type = typeValue;
               
-              console.log(`📌 Fast props for ${globalId}:`, { ifcClass, psetCount: Object.keys(psets).length });
-              console.log('🔍 [getElementPropsFast] SUCCESS - returning properties');
               return { ifcClass, psets, attributes };
             }
           }
@@ -2358,8 +2317,6 @@ const App: React.FC = () => {
       }
       
       // Fallback to regular method if not found in selection
-      console.log(`📌 ${globalId} not in selection, falling back to cache`);
-      console.log('🔍 [getElementPropsFast] FALLBACK to getElementProps');
       return viewerApiRef.current!.getElementProps(globalId);
     },
     countElements: async () => {
@@ -2368,7 +2325,6 @@ const App: React.FC = () => {
     },
     iterElements: (options) => {
       const batchSize = Math.max(1, Math.floor(options?.batchSize ?? 500));
-      console.log('🔄 [viewerApi.iterElements] START', { batchSize });
       return {
         async *[Symbol.asyncIterator]() {
           const fragments = fragmentsRef.current;
@@ -2377,7 +2333,6 @@ const App: React.FC = () => {
             return;
           }
           
-          console.log(`🔄 [viewerApi.iterElements] Processing ${fragments.list.size} models with batch size ${batchSize}`);
           
           let accumulator: Array<{ modelId: string; localId: number; data: Record<string, unknown> }> = [];
           let totalYielded = 0;
@@ -2393,7 +2348,6 @@ const App: React.FC = () => {
                 : (fetched && typeof (fetched as any)[Symbol.iterator] === 'function')
                   ? Array.from(fetched as Iterable<number>)
                   : [];
-              console.log(`✅ [viewerApi.iterElements] Model ${modelId}: ${localIds.length} elements`);
             } catch (error) {
               console.error(`❌ [viewerApi.iterElements] Failed to get local IDs for model ${modelId}`, error);
               continue;
@@ -2424,7 +2378,6 @@ const App: React.FC = () => {
                   const toYield = accumulator.splice(0, batchSize);
                   totalYielded += toYield.length;
                   if (totalYielded % 5000 === 0 || totalYielded === batchSize) {
-                    console.log(`📤 [viewerApi.iterElements] Yielded ${totalYielded} elements...`);
                   }
                   yield toYield;
                 }
@@ -2440,7 +2393,6 @@ const App: React.FC = () => {
             yield accumulator;
           }
           
-          console.log(`✅ [viewerApi.iterElements] Complete: ${totalYielded} elements`);
         },
       };
     },
@@ -2484,7 +2436,6 @@ const App: React.FC = () => {
     },
     addToCache: async (globalIds: string[]) => {
       // Add elements to the cache incrementally
-      console.log(`📦 [addToCache] Adding ${globalIds.length} elements to cache`);
       const fragments = fragmentsRef.current;
       if (!fragments) {
         console.warn('📦 [addToCache] Fragments not available');
@@ -2506,24 +2457,19 @@ const App: React.FC = () => {
       
       // Add each element to cache
       const selection = selectedRef.current;
-      console.log(`📦 [addToCache] Selection has ${selection.length} items`);
       
       for (const globalId of globalIds) {
         // Skip if already in cache
         if (cache.records.has(globalId)) {
-          console.log(`📦 [addToCache] ${globalId} already in cache, skipping`);
           continue;
         }
         
-        console.log(`📦 [addToCache] Searching for ${globalId} in ${selection.length} selected items...`);
         
         // Find the element in selection
         let found = false;
         for (const item of selection) {
-          console.log(`📦 [addToCache] Checking item: modelId=${item.modelId}, localId=${item.localId}`);
           const model = fragments.list.get(item.modelId);
           if (!model) {
-            console.log(`📦 [addToCache] Model not found: ${item.modelId}`);
             continue;
           }
           
@@ -2535,7 +2481,6 @@ const App: React.FC = () => {
               if (itemGlobalId && typeof itemGlobalId === 'object') {
                 itemGlobalId = itemGlobalId.value || itemGlobalId;
               }
-              console.log(`📦 [addToCache] Item GlobalId: ${itemGlobalId}, looking for: ${globalId}, match: ${itemGlobalId === globalId}`);
               if (itemGlobalId === globalId) {
                 // Extract properties using same approach as getElementPropsFast
                 const ifcClass = extractIfcClassFromData(data);
@@ -2595,7 +2540,6 @@ const App: React.FC = () => {
                 localIds.push(item.localId);
                 cache.modelLocalIds.set(item.modelId, localIds);
                 
-                console.log(`📦 [addToCache] Added ${globalId} to cache (model: ${item.modelId}, localId: ${item.localId})`);
                 found = true;
                 break;
               }
@@ -2610,7 +2554,6 @@ const App: React.FC = () => {
         }
       }
       
-      console.log(`📦 [addToCache] Cache now has ${cache.records.size} elements`);
     },
     color: async (globalIds, rgba) => {
       if (!globalIds.length) return;
@@ -2619,16 +2562,13 @@ const App: React.FC = () => {
       const world = worldRef.current;
       if (!highlighter || !fragmentsReadyRef.current || !fragments || !world) return;
       
-      console.log(`🎨 [color] Called with ${globalIds.length} GlobalIds, rgba:`, rgba);
       
       let grouped: Map<string, number[]>;
       let cache;
       try {
-        console.log(`🎨 [color] Calling groupLocalIdsByModel...`);
         const result = await groupLocalIdsByModel(globalIds);
         grouped = result.grouped;
         cache = result.cache;
-        console.log(`🎨 [color] groupLocalIdsByModel returned ${grouped.size} models`);
       } catch (error) {
         console.error(`🎨 [color] groupLocalIdsByModel failed:`, error);
         return;
@@ -2637,7 +2577,6 @@ const App: React.FC = () => {
       const color = new THREE.Color(rgba.r, rgba.g, rgba.b);
       const colorHex = color.getHex();
       
-      console.log(`🎨 [color] Grouped into ${grouped.size} models, colorHex: ${colorHex.toString(16)}`);
       
       // Store original colors so we can restore them later
       if (!idsOriginalColorsRef.current) {
@@ -2648,7 +2587,6 @@ const App: React.FC = () => {
         const model = fragments.list.get(modelId);
         if (!model || !localIds.length) continue;
         
-        console.log(`🎨 [color] Processing model ${modelId} with ${localIds.length} localIds`);
         
         try {
           const ids = Array.from(localIds);
@@ -2656,15 +2594,12 @@ const App: React.FC = () => {
           // Try the deprecated add method first (most reliable)
           if (typeof highlighter.add === 'function') {
             try {
-              console.log(`🎨 [color] Trying highlighter.add with colorHex: ${colorHex.toString(16)}`);
               highlighter.add(model, ids, colorHex);
-              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using add method`);
               
               // Force a render update
               if (world && typeof world.update === 'function') {
                 try {
                   world.update();
-                  console.log('🎨 [color] Forced world update');
                 } catch (updateError) {
                   console.debug('World update failed:', updateError);
                 }
@@ -2679,9 +2614,7 @@ const App: React.FC = () => {
           // Try highlightById (lowercase 'd')
           if (typeof highlighter.highlightById === 'function') {
             try {
-              console.log(`🎨 [color] Trying highlightById...`);
               await highlighter.highlightById(model, ids, colorHex);
-              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using highlightById`);
               continue;
             } catch (e) {
               console.debug('highlightById failed:', e);
@@ -2691,9 +2624,7 @@ const App: React.FC = () => {
           // Try highlightByID (uppercase 'ID')
           if (typeof highlighter.highlightByID === 'function') {
             try {
-              console.log(`🎨 [color] Trying highlightByID...`);
               await highlighter.highlightByID(model, ids, colorHex);
-              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using highlightByID`);
               continue;
             } catch (e) {
               console.debug('highlightByID failed:', e);
@@ -2740,7 +2671,6 @@ const App: React.FC = () => {
                 }
               }
               
-              console.log(`✅ Successfully colored ${ids.length} elements in model ${modelId} using styles.set`);
               continue;
             } catch (e) {
               console.debug('styles.set failed:', e);
@@ -2758,29 +2688,35 @@ const App: React.FC = () => {
       const highlighter = highlighterRef.current;
       const fragments = fragmentsRef.current;
       
-      if (!fragmentsReadyRef.current) return;
+      if (!fragmentsReadyRef.current || !fragments) return;
       
-      // Restore original material properties (clear ghost effect)
-      if (fragments && ghostOriginalMaterialsRef.current && ghostOriginalMaterialsRef.current.size > 0) {
-        try {
-          for (const [material, originalProps] of ghostOriginalMaterialsRef.current) {
-            const { color, transparent, opacity } = originalProps;
-            material.transparent = transparent;
-            material.opacity = opacity;
-            if (color !== undefined) {
-              if ('color' in material) {
-                material.color.setHex(color);
-              } else if ('lodColor' in material) {
-                material.lodColor.setHex(color);
-              }
-            }
-            material.needsUpdate = true;
+      // Restore filter ghost materials
+      const filterOriginalColors = filterGhostOriginalColorsRef.current;
+      if (filterOriginalColors.size > 0) {
+        for (const [material, data] of filterOriginalColors) {
+          const { color, transparent, opacity } = data;
+          material.transparent = transparent;
+          material.opacity = opacity;
+          if ('color' in material) {
+            (material as any).color.setHex(color);
+          } else {
+            (material as any).lodColor.setHex(color);
           }
-          ghostOriginalMaterialsRef.current.clear();
-          console.log('Restored original material properties');
-        } catch (error) {
-          console.warn('Failed to restore original materials', error);
+          material.needsUpdate = true;
         }
+        filterOriginalColors.clear();
+      }
+      
+      // Re-enable highlighter
+      if (highlighter && isFilterGhostModeRef.current) {
+        (highlighter as any).enabled = true;
+        isFilterGhostModeRef.current = false;
+      }
+      
+      // Remove custom highlights
+      if (fragments) {
+        fragments.resetHighlight();
+        fragments.core.update(true);
       }
       
       // Clear using highlighter - this will remove all highlights
@@ -2790,7 +2726,6 @@ const App: React.FC = () => {
           if (highlighter.styles && typeof highlighter.styles.delete === 'function') {
             try {
               highlighter.styles.delete('ghost');
-              console.log('Cleared ghost styles');
             } catch (error) {
               console.warn('Failed to clear ghost styles', error);
             }
@@ -2799,13 +2734,11 @@ const App: React.FC = () => {
           // Try the new clear API first
           if (typeof highlighter.clear === 'function') {
             await Promise.resolve(highlighter.clear());
-            console.log('Cleared highlighter colors using clear()');
           }
           
           // Also clear any styles we created
           if (highlighter.styles && typeof highlighter.styles.clear === 'function') {
             highlighter.styles.clear();
-            console.log('Cleared highlighter styles');
           }
         }
       } catch (error) {
@@ -2826,9 +2759,8 @@ const App: React.FC = () => {
           prev.mesh.instanceColor.needsUpdate = true;
         }
       } catch (error) {
-        console.warn('Failed to reset instanced mesh highlight', error);
+        // Ignore error
       }
-      prevInstanceHighlightRef.current = null;
     },
     isolate: async (globalIds) => {
       const hider = hiderRef.current;
@@ -2884,97 +2816,82 @@ const App: React.FC = () => {
       await Promise.resolve(hider.set(true));
     },
     ghost: async (globalIds) => {
-      // Ghost mode: Since transparency doesn't work and highlighter.add() is deprecated,
-      // we'll just color the matching elements using the color API
-      console.log(`[ghost] Applying ghost mode by coloring ${globalIds.length} matching elements`);
-      
       const fragments = fragmentsRef.current;
-      const world = worldRef.current;
-      if (!fragments || !fragmentsReadyRef.current || !world) {
-        console.warn('[ghost] Fragments or world not ready');
+      const highlighter = highlighterRef.current;
+      
+      // Check if everything is properly initialized
+      if (!fragments || !fragmentsReadyRef.current || !highlighter) {
         return;
       }
       
-      // Group by model
+      // Group globalIds by model to get selection map
       const { grouped } = await groupLocalIdsByModel(globalIds);
       if (grouped.size === 0) {
-        console.warn('[ghost] No elements found');
         return;
       }
       
-      // Get all materials and make them semi-transparent (ghost the whole model)
-      const allMaterials = [...(fragments as any).core.models.materials.list.values()];
-      console.log(`[ghost] Found ${allMaterials.length} materials to ghost`);
-      
-      // Save original material properties
-      if (!ghostOriginalMaterialsRef.current) {
-        ghostOriginalMaterialsRef.current = new Map();
-      }
-      
-      // Ghost ALL materials
-      for (const material of allMaterials) {
-        if (material.userData?.customId) continue;
-        
-        // Save original if not saved
-        if (!ghostOriginalMaterialsRef.current.has(material)) {
-          let color: number | undefined;
-          if ('color' in material) {
-            color = material.color.getHex();
-          } else if ('lodColor' in material) {
-            color = material.lodColor.getHex();
-          }
-          
-          ghostOriginalMaterialsRef.current.set(material, {
-            color,
-            transparent: material.transparent,
-            opacity: material.opacity,
-          });
-        }
-        
-        // Make semi-transparent
-        material.transparent = true;
-        material.opacity = 0.15;
-        material.needsUpdate = true;
-      }
-      
-      console.log(`[ghost] Ghosted ${allMaterials.length} materials`);
-      
-      // Now color the matching elements in bright cyan using highlighter.add directly (deprecated but works)
-      const highlighter = highlighterRef.current;
-      if (!highlighter) {
-        console.warn('[ghost] Highlighter not available');
-        world.update();
-        return;
-      }
-      
-      const cyan = new THREE.Color(0, 1, 1);
-      const cyanHex = cyan.getHex();
-      
-      let coloredCount = 0;
+      // Build selection map (fragmentId -> Set<localId>)
+      const selection: Record<string, Set<number>> = {};
       for (const [modelId, localIds] of grouped.entries()) {
-        const model = fragments.list.get(modelId);
-        if (!model) continue;
+        selection[modelId] = new Set(localIds);
+      }
+      
+      // Disable highlighter to prevent interference
+      (highlighter as any).enabled = false;
+      isFilterGhostModeRef.current = true;
+      
+      // Ghost all materials
+      const materials = [...fragments.core.models.materials.list.values()];
+      const originalColors = filterGhostOriginalColorsRef.current;
+      
+      for (const material of materials) {
+        if ((material as any).userData.customId) continue;
         
-        try {
-          // Use add (even though deprecated) because it actually works
-          if (typeof highlighter.add === 'function') {
-            highlighter.add(model, Array.from(localIds), cyanHex);
-            coloredCount += localIds.length;
-            console.log(`[ghost] Colored ${localIds.length} elements in model ${modelId}`);
-          }
-        } catch (error) {
-          console.error(`[ghost] Failed to color elements in model ${modelId}:`, error);
+        let color: number;
+        if ('color' in material) {
+          color = (material as any).color.getHex();
+        } else {
+          color = (material as any).lodColor.getHex();
+        }
+        
+        originalColors.set(material, {
+          color,
+          transparent: material.transparent,
+          opacity: material.opacity,
+        });
+        
+        material.transparent = true;
+        material.opacity = 0.05;
+        material.needsUpdate = true;
+        if ('color' in material) {
+          (material as any).color.setColorName('white');
+        } else {
+          (material as any).lodColor.setColorName('white');
         }
       }
       
-      // Force update
-      world.update();
+      // Highlight matching elements in orange
+      if (Object.keys(selection).length > 0) {
+        try {
+          fragments.highlight(
+            {
+              customId: 'filter-ghost',
+              color: new THREE.Color(0xff9800), // Orange (same as View Controls ghost)
+              renderedFaces: 1,
+              opacity: 1,
+              transparent: false,
+            },
+            selection,
+          );
+        } catch (err) {
+          // Failed to apply highlight, continue anyway
+        }
+      }
       
-      console.log(`[ghost] Complete: ghosted ${allMaterials.length} materials, colored ${coloredCount} matching elements in cyan`);
+      fragments.core.update(true);
     },
     // On-demand property loading (ThatOpen pattern)
     getItemsData: async (globalIds: string[], config?: any) => {
-      console.log('🔍 [getItemsData] START', { globalIds: globalIds.length, config });
       const fragments = fragmentsRef.current;
       if (!fragments) {
         console.error('🔍 [getItemsData] Fragments not available');
@@ -2998,11 +2915,9 @@ const App: React.FC = () => {
         }
       }
       
-      console.log('✅ [getItemsData] Complete:', results.length, 'items');
       return results;
     },
     getItemsByCategory: async (categories: RegExp[]) => {
-      console.log('🔍 [getItemsByCategory] START', { categories: categories.length });
       const fragments = fragmentsRef.current;
       if (!fragments) {
         console.error('🔍 [getItemsByCategory] Fragments not available');
@@ -3026,11 +2941,9 @@ const App: React.FC = () => {
         }
       }
       
-      console.log('✅ [getItemsByCategory] Complete:', Object.keys(result).length, 'models');
       return result;
     },
     getItemsDataByModel: async (modelId: string, localIds: number[], config?: any) => {
-      console.log('🔍 [getItemsDataByModel] START', { modelId, localIds: localIds.length, config });
       const fragments = fragmentsRef.current;
       if (!fragments) {
         console.error('🔍 [getItemsDataByModel] Fragments not available');
@@ -3045,7 +2958,6 @@ const App: React.FC = () => {
       
       try {
         const data = await model.getItemsData(localIds, config);
-        console.log('✅ [getItemsDataByModel] Complete:', data.length, 'items');
         return data as any; // Fragment's ItemData is compatible with our ItemData type
       } catch (error) {
         console.error(`🔍 [getItemsDataByModel] Failed for model ${modelId}`, error);
@@ -3281,6 +3193,10 @@ const App: React.FC = () => {
     };
 
     const clearHandler = () => {
+      // Don't clear selection in ghost mode - we want to preserve the highlight
+      if (isGhostModeRef.current || isFilterGhostModeRef.current) {
+        return;
+      }
       setSelectedItems([]);
       updateSelectedProperties(null);
     };
@@ -3315,13 +3231,25 @@ const App: React.FC = () => {
       highlighter.setup({ world });
       highlighter.zoomToSelection = true;
       
-      // Ensure default "select" style exists to prevent "Selection select does not exist" error
+      // Ensure default "select" style exists and wait for selection system to be ready
       try {
         if (typeof (highlighter as any).create === 'function') {
           (highlighter as any).create('select');
         }
+        
+        // Quick check for selection system (max 200ms wait)
+        let retries = 0;
+        const maxRetries = 10; // 10 x 20ms = 200ms max
+        while (retries < maxRetries && (!(highlighter as any).selection || !(highlighter as any).selection.select)) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          retries++;
+        }
+        
+        if (!(highlighter as any).selection || !(highlighter as any).selection.select) {
+          console.warn('Highlighter selection system still initializing (non-blocking)');
+        }
       } catch (error) {
-        // Ignore if select already exists
+        console.warn('Error during highlighter initialization:', error);
       }
       
       highlighterRef.current = highlighter;
@@ -3366,7 +3294,6 @@ const App: React.FC = () => {
         if ((measurementTool as any).list?.onItemAdded) {
           (measurementTool as any).list.onItemAdded.add((line: any) => {
             const distance = line.value || line.distance?.() || 0;
-            console.log(`✅ Measurement created: ${distance.toFixed(3)} units`);
             
             // Update the displayed measurement value
             setLastMeasurementValue(distance.toFixed(3));
@@ -3382,8 +3309,6 @@ const App: React.FC = () => {
         measurementTool.enabled = false;
         
         measurementToolRef.current = measurementTool;
-        console.log('✅ Measurement tool initialized:', measurementTool);
-        console.log('Measurement tool properties:', Object.keys(measurementTool));
       } catch (error) {
         console.error('Failed to initialize measurement tool:', error);
       }
@@ -3583,7 +3508,6 @@ const App: React.FC = () => {
             const percent = raw <= 1 ? raw * 100 : raw;
             const clamped = Math.max(0, Math.min(100, percent));
             setIfcProgress(Number(clamped.toFixed(1)));
-            console.log(`IFC conversion progress: ${clamped.toFixed(1)}%`, msg);
           },
           // Pass abort signal if importer supports it; harmless if ignored
           signal: ctrl.signal,
@@ -3676,7 +3600,6 @@ const App: React.FC = () => {
       if (usedIfcProgress) setIfcProgress(100);
     } catch (err: any) {
       if (err && (err.__cancelled || err?.name === 'AbortError')) {
-        console.info('IFC conversion cancelled by user.');
       } else {
         console.error(err);
         alert('Failed to load model. See console for more details.');
@@ -3892,7 +3815,6 @@ const App: React.FC = () => {
 
     const matches = entries.filter((entry) => entry.matched.size > 0);
     if (!matches.length) {
-      console.info('AI selection produced no matches for command', command);
       return;
     }
 
@@ -4283,7 +4205,6 @@ const App: React.FC = () => {
     let pickTimeout: ReturnType<typeof setTimeout> | null = null;
     
     const performRectangleSelection = async (left: number, top: number, right: number, bottom: number) => {
-      console.log('🔷 Rectangle Selection Started (viewport coords)', { left, top, right, bottom });
       
       const fr = fragmentsRef.current;
       if (!fr) {
@@ -4291,7 +4212,6 @@ const App: React.FC = () => {
         return;
       }
       
-      console.log('📦 Models available:', fr.list.size);
       
       const threeCamera = getThreeCamera();
       if (!threeCamera) {
@@ -4300,12 +4220,6 @@ const App: React.FC = () => {
       }
       
       const rect = dom.getBoundingClientRect();
-      console.log('📏 Canvas bounds:', { 
-        rectLeft: rect.left, 
-        rectTop: rect.top, 
-        rectWidth: rect.width, 
-        rectHeight: rect.height 
-      });
       
       const raycaster = new THREE.Raycaster();
       const selectedMap = new Map<string, Set<number>>();
@@ -4315,11 +4229,9 @@ const App: React.FC = () => {
       const width = right - left;
       const height = bottom - top;
       
-      console.log('📐 Rectangle size:', { width, height, sampleSize });
       
       // If rectangle is too small, treat as click
       if (width < 3 || height < 3) {
-        console.log('⚠️ Rectangle too small, using click selection');
         await pickAt((left + right) / 2, (top + bottom) / 2);
         return;
       }
@@ -4342,12 +4254,6 @@ const App: React.FC = () => {
           mouse.set(mouseX, mouseY);
           
           if (firstSample) {
-            console.log('🔍 First sample point:', {
-              screenCoords: { x, y },
-              rectBounds: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-              mouseNDC: { x: mouseX, y: mouseY },
-              mouseVector: mouse.clone()
-            });
           }
           
           // Check intersection with all models using ThatOpen's raycast method
@@ -4358,12 +4264,6 @@ const App: React.FC = () => {
               
               // Debug: Log raycast params for first sample only
               if (firstSample) {
-                console.log('🔬 Raycast params:', {
-                  mouseVec: mouseVec.clone(),
-                  cameraType: threeCamera.type,
-                  domElement: dom?.tagName,
-                  modelId: model.modelId
-                });
               }
               
               // Use ThatOpen's built-in raycast
@@ -4375,24 +4275,12 @@ const App: React.FC = () => {
               
               // Debug: Log result for first sample
               if (firstSample) {
-                console.log('🔬 Raycast result:', {
-                  hit: hit,
-                  hasDistance: hit && typeof hit.distance === 'number',
-                  hitType: typeof hit
-                });
               }
               
               if (hit && typeof hit.distance === 'number') {
                 hitCount++;
                 const localId = (hit as any).localId;
                 
-                console.log('🎯 Hit found:', { 
-                  point: { x, y }, 
-                  mouseNDC: { x: mouseX, y: mouseY },
-                  localId, 
-                  distance: hit.distance,
-                  modelId: model.modelId 
-                });
                 
                 if (localId !== undefined && localId !== null && Number.isInteger(localId)) {
                   if (!selectedMap.has(model.modelId)) {
@@ -4417,7 +4305,6 @@ const App: React.FC = () => {
         }
       }
       
-      console.log('📊 Sampling complete:', { samplePoints, hitCount, uniqueObjects: selectedMap.size });
       
       // Convert to Selection array
       const selections: Selection[] = [];
@@ -4427,13 +4314,6 @@ const App: React.FC = () => {
         }
       }
       
-      console.log('✅ Rectangle Selection Result:', {
-        totalSelected: selections.length,
-        byModel: Array.from(selectedMap.entries()).map(([modelId, ids]) => ({
-          modelId,
-          count: ids.size
-        }))
-      });
       
       if (selections.length === 0) {
         console.warn('⚠️ No objects found in rectangle');
@@ -4448,11 +4328,9 @@ const App: React.FC = () => {
       const selectionChanged = !selectionsMatch(selections, prevSelections);
       
       if (!selectionChanged) {
-        console.log('ℹ️ Selection unchanged');
         return;
       }
       
-      console.log('🔄 Updating selection with', selections.length, 'objects');
       setSelectedItems(selections);
       handleExplorerOpen();
       
@@ -4482,11 +4360,6 @@ const App: React.FC = () => {
       mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
       
-      console.log('🖱️ Click selection:', {
-        viewport: { x: clientX, y: clientY },
-        canvasBounds: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-        mouseNDC: { x: mouse.x, y: mouse.y }
-      });
       let best: { dist: number; model: any; localId: number; point?: THREE.Vector3; object?: any; instanceId?: number } | null = null;
       const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, threeCamera);
@@ -4510,22 +4383,32 @@ const App: React.FC = () => {
         }
       } catch (error) {
         // Skip models that cause raycasting errors
-        console.debug('Skipping model due to raycast error:', error);
       }
     }
-      if (!best) return;
+      if (!best) {
+        return;
+      }
       
       // Always use Open Company's Highlighter API for consistent, performant highlighting
       const hl = highlighterRef.current;
-      if (hl) {
+      
+      if (hl && (hl as any).enabled !== false) {
         try {
-          // Clear previous highlight
-          if (typeof hl.clear === 'function') {
+          // Clear previous highlight (but not in ghost modes - preserve custom highlights)
+          if (typeof hl.clear === 'function' && !isGhostModeRef.current && !isFilterGhostModeRef.current) {
             hl.clear();
           }
           
           // Apply new highlight using the most compatible method
           const colorHex = 0x66ccff;
+          
+          // Check if highlighter is properly initialized (including selection system)
+          const hasSelection = (hl as any).selection && (hl as any).selection.select;
+          if (!(hl as any).onBeforeHighlight || !hasSelection) {
+            // Highlighter not ready yet, skip silently
+            return;
+          }
+          
           if (typeof hl.highlightByID === 'function') {
             // Newer API
             await hl.highlightByID(best.model.uuid, [best.localId], colorHex);
@@ -4624,16 +4507,8 @@ const App: React.FC = () => {
       setContextMenu(null);
       if (ev.button !== 0) return; // left button only
       
-      console.log('👆 PointerDown:', { 
-        mode: selectionModeRef.current, 
-        measuring: isMeasuringRef.current,
-        x: ev.clientX, 
-        y: ev.clientY 
-      });
-      
       // Check selection mode
       if (selectionModeRef.current === 'rectangle' && !isMeasuringRef.current) {
-        console.log('🟦 Starting rectangle selection');
         // Start rectangle selection
         isDrawingSelectionRef.current = true;
         selectionStartRef.current = { x: ev.clientX, y: ev.clientY };
@@ -4680,14 +4555,7 @@ const App: React.FC = () => {
     };
     
     const onPointerUp = async (ev: PointerEvent) => {
-      console.log('👆 PointerUp:', { 
-        drawing: isDrawingSelectionRef.current,
-        x: ev.clientX, 
-        y: ev.clientY 
-      });
-      
       if (isDrawingSelectionRef.current && selectionStartRef.current && selectionBoxRef.current) {
-        console.log('🟦 Completing rectangle selection');
         // Complete rectangle selection
         const start = selectionStartRef.current;
         const box = selectionBoxRef.current;
@@ -4721,7 +4589,6 @@ const App: React.FC = () => {
       if (isMeasuringRef.current) {
         const measurementTool = measurementToolRef.current;
         if (measurementTool && typeof measurementTool.create === 'function') {
-          console.log('📏 Creating measurement point');
           measurementTool.create();
         }
       }
@@ -4741,7 +4608,6 @@ const App: React.FC = () => {
       if (isMeasuringRef.current && (event.code === 'Delete' || event.code === 'Backspace')) {
         const measurementTool = measurementToolRef.current;
         if (measurementTool && typeof measurementTool.delete === 'function') {
-          console.log('Deleting measurement under cursor');
           measurementTool.delete();
         }
       }
@@ -4946,32 +4812,20 @@ const App: React.FC = () => {
   }, []);
 
   const toggleMeasurement = useCallback(() => {
-    console.log('🎯 toggleMeasurement called');
     setIsMeasuring((prev) => {
       const newState = !prev;
       isMeasuringRef.current = newState;
       
       const measurementTool = measurementToolRef.current;
-      console.log('Measurement tool:', measurementTool);
-      console.log('New state:', newState);
       
       if (measurementTool) {
         measurementTool.enabled = newState;
-        console.log('Measurement tool enabled set to:', newState);
-        console.log('Measurement tool world:', measurementTool.world);
-        console.log('Measurement tool properties:', {
-          enabled: measurementTool.enabled,
-          world: !!measurementTool.world,
-          // Check if it has the list of measurements
-          list: (measurementTool as any).list?.size || 0
-        });
         
         if (!newState) {
           try {
             // Clear all measurements when disabling
             if ((measurementTool as any).list && typeof (measurementTool as any).list.clear === 'function') {
               (measurementTool as any).list.clear();
-              console.log('All measurements cleared');
             }
             // Clear the displayed measurement value
             setLastMeasurementValue(null);
@@ -4979,10 +4833,169 @@ const App: React.FC = () => {
             console.warn('Failed to clear measurements:', error);
           }
         } else {
-          console.log('📏 Measurement mode activated - DOUBLE-CLICK two points on the model to measure distance');
         }
       } else {
         console.warn('⚠️ Measurement tool not initialized!');
+      }
+      
+      return newState;
+    });
+  }, []);
+
+  const toggleGhostMode = useCallback(() => {
+    setIsGhostMode((prev) => {
+      const newState = !prev;
+      isGhostModeRef.current = newState; // Update ref so click handler always has current value
+      const fragments = fragmentsRef.current;
+      const highlighter = highlighterRef.current;
+      const originalColors = originalColorsRef.current;
+      
+      if (!fragments) {
+        return prev;
+      }
+      
+      try {
+        if (newState) {
+          // Check if highlighter is ready
+          if (!highlighter) {
+            return prev;
+          }
+          
+          // Get currently selected elements and save them
+          const selection = (highlighter as any).selection?.select || {};
+          ghostModeSelectionRef.current = selection;
+          
+          // Disable the highlighter to prevent it from interfering with our custom highlight
+          (highlighter as any).enabled = false;
+          
+          // Enable ghost: exact ThatOpen pattern
+          const materials = [...fragments.core.models.materials.list.values()];
+          
+          for (const material of materials) {
+            // Skip materials with customId (these are highlighter-created materials)
+            if ((material as any).userData.customId) continue;
+            
+            // Save original colors
+            let color: number;
+            if ('color' in material) {
+              color = (material as any).color.getHex();
+            } else {
+              color = (material as any).lodColor.getHex();
+            }
+            
+            originalColors.set(material, {
+              color,
+              transparent: material.transparent,
+              opacity: material.opacity,
+            });
+            
+            // Set ghost appearance (will be overridden by orange highlight for selected)
+            material.transparent = true;
+            material.opacity = 0.05;
+            material.needsUpdate = true;
+            if ('color' in material) {
+              (material as any).color.setColorName('white');
+            } else {
+              (material as any).lodColor.setColorName('white');
+            }
+          }
+          
+          // Now create orange highlight for selected objects
+          if (Object.keys(selection).length > 0) {
+            try {
+              fragments.highlight(
+                {
+                  customId: 'ghost-selected',
+                  color: new THREE.Color(0xff9800), // Orange
+                  renderedFaces: 1,
+                  opacity: 1,
+                  transparent: false,
+                },
+                selection,
+              );
+            } catch (err) {
+              console.warn('Failed to apply ghost highlight:', err);
+            }
+          }
+          
+          // Update the view to show the changes
+          fragments.core.update(true);
+        } else {
+          // Disable ghost: restore original materials
+          for (const [material, data] of originalColors) {
+            const { color, transparent, opacity } = data;
+            material.transparent = transparent;
+            material.opacity = opacity;
+            if ('color' in material) {
+              (material as any).color.setHex(color);
+            } else {
+              (material as any).lodColor.setHex(color);
+            }
+            material.needsUpdate = true;
+          }
+          originalColors.clear();
+          
+          // Re-enable the highlighter
+          if (highlighter) {
+            (highlighter as any).enabled = true;
+          }
+          
+          // Clear the saved ghost mode selection
+          ghostModeSelectionRef.current = null;
+          
+          // Remove the orange highlight
+          fragments.resetHighlight();
+          
+          // Update the view to show the changes
+          fragments.core.update(true);
+        }
+      } catch (error) {
+        console.warn('Failed to toggle ghost mode:', error);
+        return prev;
+      }
+      
+      return newState;
+    });
+  }, []);
+
+  const toggleIsolateMode = useCallback(() => {
+    setIsIsolateMode((prev) => {
+      const newState = !prev;
+      const hider = hiderRef.current;
+      const highlighter = highlighterRef.current;
+      
+      if (!hider) {
+        console.warn('⚠️ Hider not available for isolate mode');
+        return prev;
+      }
+      
+      try {
+        if (newState) {
+          // Enable isolate: show ONLY selected, hide everything else
+          const selection = (highlighter as any)?.selection?.select || {};
+          const selectedFragments: Record<string, Set<number>> = {};
+          
+          // Build selection map from highlighter
+          for (const [fragmentId, indices] of Object.entries(selection)) {
+            if (indices && typeof (indices as any).size === 'number' && (indices as any).size > 0) {
+              selectedFragments[fragmentId] = indices as Set<number>;
+            }
+          }
+          
+          if (Object.keys(selectedFragments).length > 0) {
+            // Isolate: hider.set(true, fragments) shows ONLY those fragments (hides rest)
+            hider.isolate(selectedFragments);
+          } else {
+            console.warn('⚠️ No selection to isolate');
+            return prev;
+          }
+        } else {
+          // Disable isolate: show everything
+          hider.set(true);
+        }
+      } catch (error) {
+        console.warn('Failed to toggle isolate mode:', error);
+        return prev;
       }
       
       return newState;
@@ -5017,33 +5030,26 @@ const App: React.FC = () => {
   }, []);
 
   const setCameraView = useCallback((view: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso') => {
-    console.log('setCameraView called with view:', view);
     const world = worldRef.current;
     const fragments = fragmentsRef.current;
     const id = currentModelIdRef.current;
     const camera = getWorldCamera();
     const threeCamera = camera?.three;
     
-    console.log('Debug:', { hasWorld: !!world, hasFragments: !!fragments, id, hasCamera: !!camera, hasThreeCamera: !!threeCamera });
     
     if (!threeCamera || !world || !fragments || !id) {
-      console.log('Early return: missing dependencies');
       return;
     }
 
     // Get the current model
     const record = fragments.list.get(id);
-    console.log('Model record:', record);
     if (!record) {
-      console.log('Early return: no record found for id:', id);
       return;
     }
 
     // Calculate bounding box from current model
     const bbox = new THREE.Box3().setFromObject(record.object);
-    console.log('Bounding box:', bbox, 'isEmpty:', bbox.isEmpty());
     if (bbox.isEmpty()) {
-      console.log('Early return: bounding box is empty');
       return;
     }
 
@@ -5061,24 +5067,31 @@ const App: React.FC = () => {
 
     switch (view) {
       case 'top':
-        position = new THREE.Vector3(center.x, center.y + distance, center.z);
-        break;
-      case 'bottom':
-        position = new THREE.Vector3(center.x, center.y - distance, center.z);
-        break;
-      case 'front':
+        // Top view: camera above looking down (Z is vertical/height)
         position = new THREE.Vector3(center.x, center.y, center.z + distance);
         break;
-      case 'back':
+      case 'bottom':
+        // Bottom view: camera below looking up
         position = new THREE.Vector3(center.x, center.y, center.z - distance);
         break;
+      case 'front':
+        // Front view: camera in front looking back (Y is depth)
+        position = new THREE.Vector3(center.x, center.y + distance, center.z);
+        break;
+      case 'back':
+        // Back view: camera behind looking forward
+        position = new THREE.Vector3(center.x, center.y - distance, center.z);
+        break;
       case 'left':
+        // Left view: camera to the left looking right (X is horizontal)
         position = new THREE.Vector3(center.x - distance, center.y, center.z);
         break;
       case 'right':
+        // Right view: camera to the right looking left
         position = new THREE.Vector3(center.x + distance, center.y, center.z);
         break;
       case 'iso':
+        // Isometric view: camera at an angle (X, Y, Z all positive)
         position = new THREE.Vector3(
           center.x + distance * 0.7,
           center.y + distance * 0.7,
@@ -5098,13 +5111,11 @@ const App: React.FC = () => {
         center.x, center.y, center.z,
         true // enable transition
       );
-      console.log('Camera moved to:', view, 'position:', position, 'looking at:', center);
     } else {
       // Fallback to direct camera manipulation
       threeCamera.position.copy(position);
       threeCamera.lookAt(center);
       threeCamera.updateProjectionMatrix();
-      console.log('Camera moved (fallback) to:', view);
     }
   }, []);
 
@@ -5115,7 +5126,16 @@ const App: React.FC = () => {
           <Box sx={{ flexGrow: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
             {/* Logo pill: subtle background, padding and shadow for a polished look */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: 'background.paper', p: '4px 8px', borderRadius: 1.5, boxShadow: '0 1px 6px rgba(0,0,0,0.16)' }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  bgcolor: 'background.paper',
+                  p: '4px 8px',
+                  borderRadius: 1.5,
+                  boxShadow: '0 1px 6px rgba(0,0,0,0.16)'
+                }}
+              >
                 <img
                   src={import.meta.env.BASE_URL + 'savora-logo.png'}
                   alt="Savora"
@@ -5792,44 +5812,63 @@ const App: React.FC = () => {
             sx={{ 
               position: 'absolute',
               bottom: 90,
-              padding: 1.5,
+              padding: 0,
               display: 'flex',
               flexDirection: 'column',
-              gap: 1,
+              gap: 0,
               zIndex: 1600,
-              backgroundColor: 'rgba(245, 245, 245, 0.98)',
-              backdropFilter: 'blur(10px)',
+              backgroundColor: 'background.paper',
               borderRadius: 2,
-              cursor: 'move',
+              overflow: 'hidden',
               border: '1px solid rgba(0, 0, 0, 0.12)',
             }}
           >
+            {/* Blue header bar matching Model Explorer */}
             <Box 
               className="drag-handle"
               sx={{ 
                 display: 'flex', 
                 justifyContent: 'space-between', 
-                alignItems: 'center', 
-                mb: 0.5,
+                alignItems: 'center',
+                px: 1.5,
+                py: 0.75,
+                backgroundColor: 'primary.main',
+                color: 'white',
                 cursor: 'grab',
                 '&:active': { cursor: 'grabbing' }
               }}
             >
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                <DragIndicatorIcon fontSize="small" sx={{ color: 'text.secondary' }} />
-                <Typography variant="caption" sx={{ fontWeight: 600, color: 'primary.main' }}>
-                  View Controls
-                </Typography>
+              <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                View Controls
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 0.5 }}>
+                <IconButton 
+                  size="small" 
+                  onClick={() => setIsViewToolbarOpen(false)}
+                  title="Minimize toolbar"
+                  sx={{ 
+                    color: 'white',
+                    '&:hover': { bgcolor: 'rgba(255,255,255,0.1)' }
+                  }}
+                >
+                  <MinimizeIcon fontSize="small" />
+                </IconButton>
+                <IconButton 
+                  size="small" 
+                  onClick={() => setIsViewToolbarOpen(false)}
+                  title="Close toolbar"
+                  sx={{ 
+                    color: 'white',
+                    '&:hover': { bgcolor: 'rgba(255,255,255,0.1)' }
+                  }}
+                >
+                  <CloseIcon fontSize="small" />
+                </IconButton>
               </Box>
-              <IconButton 
-                size="small" 
-                onClick={() => setIsViewToolbarOpen(false)}
-                title="Close toolbar"
-                sx={{ ml: 1 }}
-              >
-                <CloseIcon fontSize="small" />
-              </IconButton>
             </Box>
+
+            {/* Content area with padding */}
+            <Box sx={{ p: 1.5 }}>
 
           {/* Camera Controls */}
           <Box sx={{ display: 'flex', gap: 0.5 }}>
@@ -6221,6 +6260,44 @@ const App: React.FC = () => {
                   <SelectAllIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
+              <Tooltip title={isGhostMode ? "Disable ghost mode" : "Enable ghost mode (make all translucent)"} PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={toggleGhostMode}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: isGhostMode ? 'warning.main' : 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: isGhostMode ? 'warning.main' : 'white',
+                    color: isGhostMode ? 'white' : 'warning.dark',
+                    '&:hover': { 
+                      backgroundColor: isGhostMode ? 'warning.dark' : 'warning.light',
+                      borderColor: 'warning.main',
+                      color: isGhostMode ? 'white' : 'warning.dark'
+                    }
+                  }}
+                >
+                  <VisibilityOffIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title={isIsolateMode ? "Show all objects" : "Isolate selection (hide non-selected)"} PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={toggleIsolateMode}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: isIsolateMode ? 'info.main' : 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: isIsolateMode ? 'info.main' : 'white',
+                    color: isIsolateMode ? 'white' : 'info.dark',
+                    '&:hover': { 
+                      backgroundColor: isIsolateMode ? 'info.dark' : 'info.light',
+                      borderColor: 'info.main',
+                      color: isIsolateMode ? 'white' : 'info.dark'
+                    }
+                  }}
+                >
+                  <VisibilityIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
             </Box>
             {selectionMode === 'rectangle' && (
               <Alert 
@@ -6237,15 +6314,36 @@ const App: React.FC = () => {
               </Alert>
             )}
           </Box>
+          </Box> {/* Close content Box */}
         </Paper>
         </Draggable>
-      ) : (
-        <Paper elevation={6} sx={{ position: 'fixed', bottom: 20, left: 20, zIndex: 1600, borderRadius: '50%' }}>
-          <IconButton onClick={() => setIsViewToolbarOpen(true)} title="Open View Controls">
-            <CenterFocusStrongIcon />
-          </IconButton>
-        </Paper>
-      )}
+      ) : null}
+
+      {/* View Controls icon - always visible in lower-left, highlighted when active */}
+      <Paper 
+        elevation={6} 
+        sx={{ 
+          position: 'fixed', 
+          bottom: 20, 
+          left: 20, 
+          zIndex: 1600, 
+          borderRadius: '50%',
+          bgcolor: isViewToolbarOpen ? 'primary.main' : 'background.paper',
+          '&:hover': {
+            bgcolor: isViewToolbarOpen ? 'primary.dark' : 'action.hover'
+          }
+        }}
+      >
+        <IconButton 
+          onClick={() => setIsViewToolbarOpen(!isViewToolbarOpen)} 
+          title={isViewToolbarOpen ? "Close View Controls" : "Open View Controls"}
+          sx={{ 
+            color: isViewToolbarOpen ? 'white' : 'action.active'
+          }}
+        >
+          <CenterFocusStrongIcon />
+        </IconButton>
+      </Paper>
 
       {/* Model Filter Dialog (lazy) */}
       <Suspense fallback={null}>

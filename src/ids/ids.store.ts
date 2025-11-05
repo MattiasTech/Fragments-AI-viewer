@@ -230,11 +230,8 @@ const storeApi = {
     // Check validation mode and filter elements accordingly
     let filterGlobalIds: string[] | undefined;
     if (state.validationMode === 'selected') {
-      console.log('🎯 Selected Only mode is active');
       if (viewerApi.getSelectedGlobalIds) {
-        console.log('🎯 Getting selected GlobalIds...');
         filterGlobalIds = await viewerApi.getSelectedGlobalIds();
-        console.log('🎯 Selected GlobalIds:', filterGlobalIds);
         if (!filterGlobalIds || filterGlobalIds.length === 0) {
           console.error('❌ No elements selected');
           setState((prev) => ({
@@ -243,7 +240,6 @@ const storeApi = {
           }));
           return;
         }
-        console.log(`🎯 Validating ${filterGlobalIds.length} selected elements`);
       } else {
         console.warn('⚠️ getSelectedGlobalIds not available on viewerApi');
         setState((prev) => ({
@@ -253,11 +249,8 @@ const storeApi = {
         return;
       }
     } else if (state.validationMode === 'visible') {
-      console.log('👁️ Visible Only mode is active');
       if (viewerApi.getVisibleGlobalIds) {
-        console.log('👁️ Getting visible GlobalIds...');
         filterGlobalIds = await viewerApi.getVisibleGlobalIds();
-        console.log('👁️ Visible GlobalIds:', filterGlobalIds);
         if (!filterGlobalIds || filterGlobalIds.length === 0) {
           console.error('❌ No visible elements found');
           setState((prev) => ({
@@ -266,7 +259,6 @@ const storeApi = {
           }));
           return;
         }
-        console.log(`👁️ Validating ${filterGlobalIds.length} visible elements`);
       } else {
         console.warn('⚠️ getVisibleGlobalIds not available on viewerApi');
         setState((prev) => ({
@@ -359,10 +351,8 @@ const storeApi = {
 
       // Add validated elements to cache for future use (e.g., highlighting)
       if (filterGlobalIds && filterGlobalIds.length > 0 && typeof viewerApi.addToCache === 'function') {
-        console.log(`📦 Adding ${filterGlobalIds.length} validated elements to cache...`);
         try {
           await viewerApi.addToCache(filterGlobalIds);
-          console.log('📦 Successfully updated cache with validated elements');
         } catch (error) {
           console.warn('📦 Failed to add elements to cache:', error);
         }
@@ -413,7 +403,6 @@ const storeApi = {
     }));
   },
   cancelValidation: () => {
-    console.log('🛑 Cancelling IDS validation...');
     if (currentValidationController) {
       currentValidationController.abort();
       currentValidationController = null;

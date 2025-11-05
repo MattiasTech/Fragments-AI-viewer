@@ -76,7 +76,6 @@ export const idsDb = {
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error ?? new Error('IndexedDB set failed'));
     });
-    console.log(`💾 Cached ${elements.length} elements to IndexedDB for key: ${modelKey.substring(0, 16)}...`);
   },
   async append(modelKey: string, elements: ElementData[]): Promise<void> {
     if (!elements || !elements.length) return;
@@ -105,7 +104,6 @@ export const idsDb = {
       };
       getReq.onerror = () => reject(getReq.error ?? new Error('IndexedDB append get failed'));
     });
-    console.log(`💾 Appended ${elements.length} elements to IndexedDB for key: ${modelKey.substring(0, 16)}...`);
   },
   // Per-part storage API: write a part under a partKey and update metadata
   async writePart(modelKey: string, partIndex: number, elements: ElementData[]): Promise<void> {
@@ -149,7 +147,6 @@ export const idsDb = {
       };
       request.onerror = () => reject(request.error ?? new Error('IndexedDB writePart failed'));
     });
-    console.log(`💾 Wrote part ${partIndex} (${elements.length} items) for ${modelKey.substring(0, 16)}...`);
   },
   // Read persisted GlobalIds across all parts for a model (used to skip already-persisted elements)
   async getPersistedIds(modelKey: string): Promise<Set<string>> {
@@ -226,7 +223,6 @@ export const idsDb = {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error ?? new Error('IndexedDB removeParts failed'));
     });
-    console.log(`🧹 Removed ${partKeys.length} parts for ${modelKey.substring(0, 16)}...`);
   },
   async getMetadata(modelKey: string): Promise<CacheMetadata | null> {
     const db = await openStore();
@@ -293,7 +289,6 @@ export const idsDb = {
         });
         
         tx.oncomplete = () => {
-          console.log(`🧹 Cleaned up ${keysToDelete.length} old cache entries from IndexedDB`);
           resolve();
         };
         tx.onerror = () => reject(tx.error ?? new Error('IndexedDB cleanup failed'));

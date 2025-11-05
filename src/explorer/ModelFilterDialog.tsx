@@ -213,7 +213,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
     if (!viewerApi || !viewerApi.getItemsByCategory || !viewerApi.getItemsDataByModel) return;
     
     setDiscoveringProperties(true);
-    console.log('🔍 [Property Discovery] START');
     
     try {
       // Get sample elements from selected categories (or all if none selected)
@@ -226,7 +225,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
       // Take up to 10 sample elements from the first model
       const [modelId, localIds] = Object.entries(categoryMap)[0] || [null, []];
       if (!modelId || localIds.length === 0) {
-        console.log('🔍 [Property Discovery] No elements found');
         setAvailableProperties([]);
         return;
       }
@@ -234,7 +232,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
       const sampleSize = Math.min(10, localIds.length);
       const sampleIds = localIds.slice(0, sampleSize);
       
-      console.log(`🔍 [Property Discovery] Sampling ${sampleSize} elements from model ${modelId}`);
       
       // Fetch with full relations using the ViewerApi method (ThatOpen pattern)
       const config = {
@@ -248,7 +245,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
       };
       
       const sampleData = await viewerApi.getItemsDataByModel(modelId, sampleIds, config);
-      console.log(`✅ [Property Discovery] Loaded ${sampleData.length} samples`);
       
       // Collect all unique property paths
       const pathSet = new Set<string>();
@@ -267,7 +263,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
         .filter(p => !p.startsWith('_')) // Remove internal fields
         .sort();
       
-      console.log(`✅ [Property Discovery] Found ${sortedPaths.length} unique properties`);
       setAvailableProperties(sortedPaths);
       
     } catch (error: any) {
@@ -297,7 +292,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
     
     try {
       // Step 1: Get items by category (fast - no property loading)
-      console.log('🔍 [Filter] Step 1: Getting items by category...');
       let categoryMap: Record<string, number[]>;
       
       if (selectedIfcTypes.length > 0) {
@@ -311,7 +305,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
       
       // Count total items
       const totalItems = Object.values(categoryMap).reduce((sum, ids) => sum + ids.length, 0);
-      console.log(`🔍 [Filter] Found ${totalItems} items to check`);
       
       if (totalItems === 0) {
         alert('⚠️ No elements found matching the category filter');
@@ -320,7 +313,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
       }
       
       // Step 2: Load properties on-demand and filter (only filtered elements!)
-      console.log('🔍 [Filter] Step 2: Loading properties for', totalItems, 'filtered elements...');
       let processed = 0;
       
       // Configure what relations to load (ThatOpen pattern)
@@ -342,7 +334,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
       for (const [modelId, localIds] of Object.entries(categoryMap)) {
         if (localIds.length === 0) continue;
         
-        console.log(`🔍 [Filter] Processing model ${modelId}: ${localIds.length} elements`);
         
         // Use ViewerApi method to get items data
         if (!viewerApi.getItemsDataByModel) {
@@ -352,7 +343,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
         
         // Fetch data for just these local IDs
         const itemsData = await viewerApi.getItemsDataByModel(modelId, localIds, config);
-        console.log(`✅ [Filter] Loaded ${itemsData.length} items from model ${modelId}`);
         
         // Filter and collect matching GlobalIds
         for (const item of itemsData) {
@@ -372,7 +362,6 @@ export default function ModelFilterDialog({ open, onClose, viewerApi }: Props) {
         }
       }
       
-      console.log(`✅ [Filter] Complete: ${matchingGlobalIds.length} matches out of ${totalItems} elements`);
       setResultIds(matchingGlobalIds);
       
       if (matchingGlobalIds.length === 0) {

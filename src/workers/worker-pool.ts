@@ -54,7 +54,6 @@ export class WorkerPool {
       }
     }
     
-    console.log(`✅ Initialized ${this.workers.length} workers for parallel processing`);
   }
   
   /**
@@ -79,8 +78,6 @@ export class WorkerPool {
     this.completedBatches = 0;
     this.results.clear();
     
-    console.log(`📦 Split ${elements.length} elements into ${this.totalBatches} batches (${this.batchSize} per batch)`);
-    console.log(`🚀 Processing with ${this.workers.length} workers...`);
     
     // Start processing
     const promise = new Promise<ProcessedElement[]>((resolve, reject) => {
@@ -109,7 +106,6 @@ export class WorkerPool {
               }
             }
             
-            console.log(`✅ Completed processing ${allResults.length} elements`);
             resolve(allResults);
           } else {
             // Send next batch to this worker
@@ -170,7 +166,6 @@ export class WorkerPool {
   terminate(): void {
     this.workers.forEach(worker => worker.terminate());
     this.workers = [];
-    console.log('🛑 Terminated all workers');
   }
 }
 

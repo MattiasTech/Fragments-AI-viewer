@@ -571,7 +571,6 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
         }
       }
       
-      console.log(`Highlighted ${passedArray.length} passed, ${failedArray.length} failed, ${naArray.length} N/A elements`);
     } catch (error) {
       console.error('Failed to highlight all elements by status', error);
     }
