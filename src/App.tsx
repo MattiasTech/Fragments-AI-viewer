@@ -1292,6 +1292,8 @@ const App: React.FC = () => {
   const isFilterGhostModeRef = useRef(false);
   // Filter ghost mode: store original material colors
   const filterGhostOriginalColorsRef = useRef<Map<any, { color: number; transparent: boolean; opacity: number }>>(new Map());
+  // Filter ghost mode: store the filtered selection for "select visible objects" feature
+  const filterGhostSelectionRef = useRef<Record<string, Set<number>> | null>(null);
   const [idsExpandSignal, setIdsExpandSignal] = useState(0);
   const [isIdsCreatorOpen, setIsIdsCreatorOpen] = useState(false);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
@@ -2707,11 +2709,17 @@ const App: React.FC = () => {
         filterOriginalColors.clear();
       }
       
-      // Re-enable highlighter
+      // Re-enable highlighter and clear filter selection
+      // Only clear if we're actually in filter ghost mode
       if (highlighter && isFilterGhostModeRef.current) {
         (highlighter as any).enabled = true;
         isFilterGhostModeRef.current = false;
+        filterGhostSelectionRef.current = null;
       }
+      
+      // Always clear the filter selection ref when clearing colors
+      // This ensures old filter data doesn't persist
+      filterGhostSelectionRef.current = null;
       
       // Remove custom highlights
       if (fragments) {
@@ -2819,22 +2827,33 @@ const App: React.FC = () => {
       const fragments = fragmentsRef.current;
       const highlighter = highlighterRef.current;
       
+      console.log(`🎭 ghost() called with ${globalIds.length} global IDs`);
+      
       // Check if everything is properly initialized
       if (!fragments || !fragmentsReadyRef.current || !highlighter) {
+        console.warn('🎭 ghost() aborted: fragments or highlighter not ready');
         return;
       }
       
       // Group globalIds by model to get selection map
       const { grouped } = await groupLocalIdsByModel(globalIds);
       if (grouped.size === 0) {
+        console.warn('🎭 ghost() aborted: no grouped IDs');
         return;
       }
       
       // Build selection map (fragmentId -> Set<localId>)
       const selection: Record<string, Set<number>> = {};
+      let totalCount = 0;
       for (const [modelId, localIds] of grouped.entries()) {
         selection[modelId] = new Set(localIds);
+        totalCount += localIds.length;
       }
+      
+      console.log(`🎭 ghost() applying to ${totalCount} objects across ${grouped.size} models`);
+      
+      // Store the selection for "select visible objects" feature
+      filterGhostSelectionRef.current = selection;
       
       // Disable highlighter to prevent interference
       (highlighter as any).enabled = false;
@@ -4229,6 +4248,21 @@ const App: React.FC = () => {
       const width = right - left;
       const height = bottom - top;
       
+      console.log(`Rectangle selection: ${Math.round(width)}x${Math.round(height)} pixels, models: ${fr.list.size}`);
+      console.log(`Filter ghost mode active: ${isFilterGhostModeRef.current}`);
+      
+      // Check if models are available and have objects
+      let totalModelObjects = 0;
+      for (const model of fr.list.values()) {
+        try {
+          const ids = await model.getLocalIds();
+          const count = Array.isArray(ids) ? ids.length : (ids && typeof ids[Symbol.iterator] === 'function' ? Array.from(ids).length : 0);
+          totalModelObjects += count;
+        } catch (err) {
+          console.debug('Failed to get object count for model:', err);
+        }
+      }
+      console.log(`Total objects in models: ${totalModelObjects}`);
       
       // If rectangle is too small, treat as click
       if (width < 3 || height < 3) {
@@ -4238,6 +4272,31 @@ const App: React.FC = () => {
       
       let samplePoints = 0;
       let hitCount = 0;
+      let errorCount = 0;
+      
+      // Test: Try a single raycast in the center of the rectangle
+      const centerX = (left + right) / 2;
+      const centerY = (top + bottom) / 2;
+      const centerMouseX = ((centerX - rect.left) / rect.width) * 2 - 1;
+      const centerMouseY = -((centerY - rect.top) / rect.height) * 2 + 1;
+      console.log(`Testing center point: screen=(${Math.round(centerX)}, ${Math.round(centerY)}), NDC=(${centerMouseX.toFixed(3)}, ${centerMouseY.toFixed(3)})`);
+      
+      for (const model of fr.list.values()) {
+        try {
+          const testHit = await model.raycast({ 
+            camera: threeCamera, 
+            mouse: new THREE.Vector2(centerMouseX, centerMouseY),
+            dom: dom
+          });
+          if (testHit && typeof testHit.distance === 'number') {
+            console.log(`✓ Center point HIT! distance=${testHit.distance.toFixed(2)}, localId=${(testHit as any).localId}`);
+          } else {
+            console.log(`✗ Center point MISS (hit=${!!testHit})`);
+          }
+        } catch (err) {
+          console.log(`✗ Center point ERROR:`, err);
+        }
+      }
       
       // Debug: Log the first sample point for comparison with click
       let firstSample = true;
@@ -4291,6 +4350,7 @@ const App: React.FC = () => {
               }
             } catch (error) {
               // Skip objects that cause raycasting errors
+              errorCount++;
               if (firstSample) {
                 console.warn('❌ Raycast error on first sample:', error);
               }
@@ -4316,12 +4376,16 @@ const App: React.FC = () => {
       
       
       if (selections.length === 0) {
-        console.warn('⚠️ No objects found in rectangle');
+        console.warn(`⚠️ No objects found in rectangle (sampled ${samplePoints} points, ${hitCount} hits, ${errorCount} errors)`);
+        console.log(`Rectangle bounds: left=${Math.round(left)}, top=${Math.round(top)}, right=${Math.round(right)}, bottom=${Math.round(bottom)}`);
+        console.log(`Canvas rect: ${Math.round(rect.left)}, ${Math.round(rect.top)}, ${Math.round(rect.width)}x${Math.round(rect.height)}`);
         // No selection
         setSelectedItems([]);
         updateSelectedProperties(null);
         return;
       }
+      
+      console.log(`✓ Rectangle selection found ${selections.length} objects from ${hitCount} hits`);
       
       // Update selection
       const prevSelections = selectedRef.current;
@@ -5001,6 +5065,206 @@ const App: React.FC = () => {
       return newState;
     });
   }, []);
+
+  const selectVisibleObjects = useCallback(async () => {
+    const fragments = fragmentsRef.current;
+    const highlighter = highlighterRef.current;
+    const hider = hiderRef.current;
+
+    if (!fragments || !fragmentsReadyRef.current) {
+      console.warn('Fragments not ready');
+      return;
+    }
+
+    if (!highlighter) {
+      console.warn('Highlighter not available');
+      return;
+    }
+
+    try {
+      let visibleSelection: Record<string, Set<number>> = {};
+      let totalVisible = 0;
+      
+      // Check if filter ghost mode is active - if so, use the filtered elements
+      const hasFilterGhost = isFilterGhostModeRef.current;
+      const hasFilterSelection = filterGhostSelectionRef.current !== null;
+      
+      console.log(`Filter state: ghostMode=${hasFilterGhost}, hasSelection=${hasFilterSelection}`);
+      
+      if (hasFilterGhost && hasFilterSelection) {
+        // Ghost mode: Use the stored filtered selection
+        visibleSelection = filterGhostSelectionRef.current!;
+        totalVisible = Object.values(visibleSelection).reduce((sum, set) => sum + set.size, 0);
+        
+        if (totalVisible === 0) {
+          console.warn('No filtered objects found. Try using the Model Filter first.');
+          return;
+        }
+        
+        console.log(`Selecting ${totalVisible} filtered objects (ghost mode)`);
+      } else if (hider && (hider as any).list && (hider as any).list.size > 0) {
+        // Isolate mode or manual hiding: Get visible (non-hidden) objects
+        console.log(`Checking for hidden objects in ${fragments.list.size} models`);
+        
+        for (const [modelId, model] of fragments.list) {
+          try {
+            // Get all local IDs for this model
+            let allLocalIds: number[] = [];
+            const fetched = await model.getLocalIds();
+            if (Array.isArray(fetched)) {
+              allLocalIds = fetched;
+            } else if (fetched && typeof (fetched as any)[Symbol.iterator] === 'function') {
+              allLocalIds = Array.from(fetched as Iterable<number>);
+            }
+
+            if (allLocalIds.length === 0) continue;
+
+            // Get hidden IDs from hider
+            const hiddenMap = (hider as any).list?.get?.(modelId);
+            const hiddenIds: Set<number> = hiddenMap && hiddenMap.size > 0 ? hiddenMap : new Set();
+            
+            // Filter to only visible IDs (exclude hidden ones)
+            const visibleIds = allLocalIds.filter((id) => !hiddenIds.has(id));
+            
+            if (visibleIds.length > 0) {
+              visibleSelection[modelId] = new Set(visibleIds);
+              totalVisible += visibleIds.length;
+            }
+            
+            console.log(`Model ${modelId}: ${visibleIds.length} visible of ${allLocalIds.length} total (${hiddenIds.size} hidden)`);
+          } catch (error) {
+            console.error('Failed to get IDs for model', modelId, error);
+          }
+        }
+
+        if (totalVisible === 0) {
+          console.warn('No visible objects found (all are hidden)');
+          return;
+        }
+
+        console.log(`Selecting ${totalVisible} visible objects (isolate/hide mode)`);
+      } else {
+        // No filter active - get all visible (non-hidden) objects
+        for (const [modelId, model] of fragments.list) {
+          try {
+            // Get all local IDs for this model
+            let allLocalIds: number[] = [];
+            const fetched = await model.getLocalIds();
+            if (Array.isArray(fetched)) {
+              allLocalIds = fetched;
+            } else if (fetched && typeof (fetched as any)[Symbol.iterator] === 'function') {
+              allLocalIds = Array.from(fetched as Iterable<number>);
+            }
+
+            if (allLocalIds.length === 0) continue;
+
+            // Get hidden IDs if hider is available
+            let hiddenIds: Set<number> = new Set();
+            if (hider) {
+              try {
+                // Access the hider's internal state to get hidden elements
+                const hiddenMap = (hider as any).list?.get?.(modelId);
+                if (hiddenMap && hiddenMap.size > 0) {
+                  hiddenIds = hiddenMap;
+                }
+              } catch (err) {
+                // If we can't get hidden IDs, assume all are visible
+                console.debug('Could not get hidden IDs for model', modelId, err);
+              }
+            }
+
+            // Filter to only visible IDs (exclude hidden ones)
+            const visibleIds = allLocalIds.filter((id) => !hiddenIds.has(id));
+            
+            if (visibleIds.length > 0) {
+              visibleSelection[modelId] = new Set(visibleIds);
+              totalVisible += visibleIds.length;
+            }
+          } catch (error) {
+            console.error('Failed to get IDs for model', modelId, error);
+          }
+        }
+
+        if (totalVisible === 0) {
+          console.warn('No visible objects found');
+          return;
+        }
+
+        console.log(`Selecting ${totalVisible} visible objects`);
+      }
+
+      // Don't clear if filter ghost mode is active - we want to keep the filter highlighting
+      if (!isFilterGhostModeRef.current && typeof highlighter.clear === 'function') {
+        try {
+          highlighter.clear();
+        } catch (err) {
+          console.debug('Failed to clear highlighter:', err);
+        }
+      }
+
+      // Use the internal selection system to track selected objects
+      // This ensures the Model Explorer shows the selection correctly
+      let successCount = 0;
+      let failCount = 0;
+      
+      for (const [modelId, ids] of Object.entries(visibleSelection)) {
+        try {
+          // Directly populate the highlighter's internal selection map
+          // This is the most reliable method that always works
+          if ((highlighter as any).selection && (highlighter as any).selection.select) {
+            if (!(highlighter as any).selection.select[modelId]) {
+              (highlighter as any).selection.select[modelId] = new Set();
+            }
+            const selectionSet = (highlighter as any).selection.select[modelId];
+            
+            // Add all IDs to the selection
+            ids.forEach(id => selectionSet.add(id));
+            successCount++;
+          } else {
+            failCount++;
+          }
+        } catch (err) {
+          console.debug('Failed to add objects to selection for model', modelId, err);
+          failCount++;
+        }
+      }
+      
+      // Trigger highlighter events to update the visual highlighting
+      if ((highlighter as any).events && (highlighter as any).events.select) {
+        try {
+          const selectEvent = (highlighter as any).events.select;
+          if (selectEvent.onHighlight && typeof selectEvent.onHighlight.trigger === 'function') {
+            // Convert our selection map to the format expected by the event
+            const eventData: Record<string, Set<number>> = {};
+            for (const [modelId, ids] of Object.entries(visibleSelection)) {
+              eventData[modelId] = ids;
+            }
+            selectEvent.onHighlight.trigger(eventData);
+          }
+        } catch (err) {
+          console.debug('Failed to trigger highlight event:', err);
+        }
+      }
+
+      // Update the selected items state for the explorer panel
+      const selectionList: Selection[] = [];
+      for (const [modelId, ids] of Object.entries(visibleSelection)) {
+        ids.forEach((localId) => {
+          selectionList.push({ modelId, localId });
+        });
+      }
+      setSelectedItems(selectionList);
+      handleExplorerOpen();
+
+      if (failCount > 0) {
+        console.log(`✓ Selected ${totalVisible} visible objects (${successCount} models highlighted, ${failCount} failed)`);
+      } else {
+        console.log(`✓ Selected ${totalVisible} visible objects from ${successCount} models`);
+      }
+    } catch (error) {
+      console.error('Failed to select visible objects:', error);
+    }
+  }, [setSelectedItems, handleExplorerOpen]);
 
   const clearAllClipping = useCallback(() => {
     setClippingPlanes({ x: false, y: false, z: false });
@@ -6296,6 +6560,25 @@ const App: React.FC = () => {
                   }}
                 >
                   <VisibilityIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Select all visible objects" PopperProps={{ sx: { zIndex: 9999 } }}>
+                <IconButton 
+                  size="small" 
+                  onClick={selectVisibleObjects}
+                  sx={{ 
+                    border: '2px solid',
+                    borderColor: 'rgba(0, 0, 0, 0.23)',
+                    backgroundColor: 'white',
+                    color: 'success.main',
+                    '&:hover': { 
+                      backgroundColor: 'success.light',
+                      borderColor: 'success.main',
+                      color: 'success.dark'
+                    }
+                  }}
+                >
+                  <SelectAllIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
             </Box>
