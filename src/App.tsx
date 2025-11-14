@@ -68,6 +68,7 @@ import { testOpenAIConnection } from './ai/openai';
 const ChatWindow = React.lazy(() => import('./ChatWindow'));
 const IdsPanel = React.lazy(() => import('./ids/IdsPanel'));
 const IdsCreatorPanel = React.lazy(() => import('./ids/IdsCreatorPanel'));
+const QtoPanel = React.lazy(() => import('./qto/QtoPanel').then(module => ({ default: module.QtoPanel })));
 const ModelFilterPanel = React.lazy(() => import('./explorer/ModelFilterPanel'));
 import { idsStore } from './ids/ids.store';
 import type { ElementData, ViewerApi } from './ids/ids.types';
@@ -1296,6 +1297,7 @@ const App: React.FC = () => {
   const filterGhostSelectionRef = useRef<Record<string, Set<number>> | null>(null);
   const [idsExpandSignal, setIdsExpandSignal] = useState(0);
   const [isIdsCreatorOpen, setIsIdsCreatorOpen] = useState(false);
+  const [qtoVisible, setQtoVisible] = useState(false);
   const [modelSummaries, setModelSummaries] = useState<Record<string, ModelSummary>>({});
   const [lastItemsDataTSV, setLastItemsDataTSV] = useState<string | null>(null);
   const [lastItemsDataRows, setLastItemsDataRows] = useState<{ path: string; value: string }[]>([]);
@@ -1655,6 +1657,10 @@ const App: React.FC = () => {
 
   const toggleIdsCreatorPanel = useCallback(() => {
     setIsIdsCreatorOpen((prev) => !prev);
+  }, []);
+
+  const toggleQtoPanel = useCallback(() => {
+    setQtoVisible((prev) => !prev);
   }, []);
 
   const openChatWindow = useCallback(() => {
@@ -4460,7 +4466,10 @@ const App: React.FC = () => {
         try {
           // Clear previous highlight (but not in ghost modes - preserve custom highlights)
           if (typeof hl.clear === 'function' && !isGhostModeRef.current && !isFilterGhostModeRef.current) {
-            hl.clear();
+            // Check selection exists before clearing
+            if ((hl as any).selection && (hl as any).selection.select) {
+              hl.clear();
+            }
           }
           
           // Apply new highlight using the most compatible method
@@ -4473,15 +4482,22 @@ const App: React.FC = () => {
             return;
           }
           
+          // Double-check selection still exists before each call (can be disposed between checks)
           if (typeof hl.highlightByID === 'function') {
             // Newer API
-            await hl.highlightByID(best.model.uuid, [best.localId], colorHex);
+            if ((hl as any).selection && (hl as any).selection.select) {
+              await hl.highlightByID(best.model.uuid, [best.localId], colorHex);
+            }
           } else if (typeof hl.add === 'function') {
             // Alternative API
-            hl.add(best.model.uuid, [best.localId]);
+            if ((hl as any).selection && (hl as any).selection.select) {
+              hl.add(best.model.uuid, [best.localId]);
+            }
           } else if (typeof hl.highlight === 'function') {
             // Fallback API
-            await hl.highlight(best.model, [best.localId], colorHex);
+            if ((hl as any).selection && (hl as any).selection.select) {
+              await hl.highlight(best.model, [best.localId], colorHex);
+            }
           }
         } catch (err) {
           console.warn('Highlighter failed, using fallback:', err);
@@ -5492,6 +5508,22 @@ const App: React.FC = () => {
             title={isIdsCreatorOpen ? 'Close IDS Creator' : 'Open IDS Creator'}
           >
             IDS Creator
+          </Button>
+          <Button
+            color="inherit"
+            onClick={toggleQtoPanel}
+            sx={{
+              mr: 1,
+              borderRadius: 1.5,
+              backgroundColor: qtoVisible ? 'rgba(255,255,255,0.18)' : 'transparent',
+              transition: 'background-color 0.2s ease',
+              '&:hover': {
+                backgroundColor: qtoVisible ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.12)'
+              }
+            }}
+            title={qtoVisible ? 'Close QTO' : 'Open QTO'}
+          >
+            QTO
           </Button>
         </Toolbar>
       </AppBar>
@@ -6934,6 +6966,12 @@ const App: React.FC = () => {
             viewerApi={viewerApi}
             selectedItemData={properties}
             onValidate={handleValidateFromCreator}
+          />
+
+          <QtoPanel 
+            isOpen={qtoVisible} 
+            onClose={() => setQtoVisible(false)}
+            viewerApi={viewerApiRef.current}
           />
 
           <ChatWindow
