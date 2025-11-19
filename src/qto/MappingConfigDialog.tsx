@@ -40,6 +40,7 @@ import {
   exportTemplateToJson,
   importTemplateFromJson
 } from './mapping.store';
+import { getUiSetting, setUiSetting } from '../utils/uiSettings';
 
 interface MappingConfigDialogProps {
   open: boolean;
@@ -62,7 +63,10 @@ export default function MappingConfigDialog({
   const [objectTypesByClass, setObjectTypesByClass] = useState<Record<string, string[]>>({});
   const [availablePropertiesByClass, setAvailablePropertiesByClass] = useState<Record<string, string[]>>({});
   const [sampleElementsByClass, setSampleElementsByClass] = useState<Record<string, any>>({});
-  const [scanScope, setScanScope] = useState<'all' | 'selected' | 'visible'>('selected');
+  const [scanScope, setScanScope] = useState<'all' | 'selected' | 'visible'>(() => {
+    // Load saved scan scope preference
+    return getUiSetting('qtoMappingScanScope') || 'selected';
+  });
   const [isScanning, setIsScanning] = useState(false);
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [templates, setTemplates] = useState<MappingTemplate[]>([]);
@@ -235,38 +239,52 @@ export default function MappingConfigDialog({
                     }
                   }
                   
-                  // Extract object type from various possible locations in the data structure
-                  let objectType: string | undefined;
+                  // Extract object type using getElementProps to get property sets
+                  // This ensures consistency with QtoPanel extraction
+                  const globalId = unwrapValue((itemData as any)._guid);
+                  if (!globalId) continue;
                   
-                  // Extract object type following IFC standard: check property sets first (Tekla Common, etc.)
-                  // where standardized metadata is stored per discipline
-                  
-                  // 1. Check IsTypedBy relationship first (most reliable for object type)
-                  if (itemData.IsTypedBy) {
-                    const typedBy = Array.isArray(itemData.IsTypedBy) ? itemData.IsTypedBy[0] : itemData.IsTypedBy;
-                    if (typedBy) {
-                      objectType = unwrapValue(typedBy.Name) || 
-                                  unwrapValue(typedBy.Description) ||
-                                  unwrapValue(typedBy.ObjectType) ||
-                                  unwrapValue(typedBy.PredefinedType);
+                  try {
+                    const props = await viewerApi.getElementProps(globalId);
+                    let objectType: string | undefined;
+                    
+                    // 1. Check property sets (psets) - where Profile, Type, Description are stored
+                    if (props?.psets) {
+                      for (const psetName in props.psets) {
+                        const pset = props.psets[psetName];
+                        if (pset && typeof pset === 'object') {
+                          // Look for Description, Type, Profile, etc.
+                          objectType = (pset as any).Description ||
+                                      (pset as any).Type ||
+                                      (pset as any).Profile ||
+                                      (pset as any).ObjectType ||
+                                      (pset as any).PredefinedType ||
+                                      (pset as any).Reference;
+                          if (objectType && typeof objectType === 'string' && objectType.trim()) {
+                            break;
+                          }
+                        }
+                      }
                     }
-                  }
-                  
-                  // 2. Check root attributes
-                  if (!objectType) {
-                    objectType = unwrapValue((itemData as any).ObjectType) ||
-                                unwrapValue((itemData as any).PredefinedType) ||
-                                unwrapValue((itemData as any).Tag) ||
-                                unwrapValue((itemData as any).Description) ||
-                                unwrapValue((itemData as any).Name);
-                    objectType = typeof objectType === 'string' ? objectType : undefined;
-                  }
-                  
-                  if (objectType && typeof objectType === 'string' && objectType.trim() !== '') {
-                    if (!objectTypesMap.has(ifcClass)) {
-                      objectTypesMap.set(ifcClass, new Set());
+                    
+                    // 2. Fallback to root attributes
+                    if (!objectType && props?.attributes) {
+                      const attrs = props.attributes as Record<string, any>;
+                      objectType = attrs.ObjectType || 
+                                  attrs.PredefinedType || 
+                                  attrs.Tag ||
+                                  attrs.Description ||
+                                  attrs.Name;
                     }
-                    objectTypesMap.get(ifcClass)!.add(objectType.trim());
+                    
+                    if (objectType && typeof objectType === 'string' && objectType.trim() !== '') {
+                      if (!objectTypesMap.has(ifcClass)) {
+                        objectTypesMap.set(ifcClass, new Set());
+                      }
+                      objectTypesMap.get(ifcClass)!.add(objectType.trim());
+                    }
+                  } catch (err) {
+                    // Silently skip elements that fail - don't spam console
                   }
                 }
               }
@@ -674,7 +692,10 @@ export default function MappingConfigDialog({
                 value={scanScope}
                 label="Scan Scope"
                 onChange={(e) => {
-                  setScanScope(e.target.value as 'all' | 'selected' | 'visible');
+                  const newScope = e.target.value as 'all' | 'selected' | 'visible';
+                  setScanScope(newScope);
+                  // Persist the preference
+                  setUiSetting('qtoMappingScanScope', newScope);
                   setAvailableIfcClasses([]);
                   setIfcClassCounts({});
                 }}

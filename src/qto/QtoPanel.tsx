@@ -393,6 +393,43 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
       const totalElements = elementToClassMap.size || Object.values(categoryMap).reduce((sum, ids) => sum + ids.length, 0);
       setExtractionProgress({ current: 0, total: totalElements, message: `Found ${totalElements} elements to process...` });
 
+      // Pre-cache all element properties for fast access
+      // This significantly improves performance by loading all element data at once
+      setExtractionProgress({ current: 0, total: totalElements, message: 'Pre-caching element properties...' });
+      
+      // Collect all globalIds that we'll need
+      const allGlobalIdsToCache: string[] = [];
+      for (const [modelId, localIds] of Object.entries(categoryMap)) {
+        if (!localIds || localIds.length === 0) continue;
+        
+        // Fetch globalIds for this batch
+        try {
+          const itemsData = await viewerApi.getItemsDataByModel(modelId, localIds, {
+            attributes: ['GlobalId']
+          });
+          
+          for (const itemData of itemsData) {
+            const globalId = unwrapValue((itemData as any)._guid);
+            if (globalId) {
+              allGlobalIdsToCache.push(globalId);
+            }
+          }
+        } catch (err) {
+          console.warn(`Failed to get globalIds for model ${modelId}:`, err);
+        }
+      }
+      
+      // Pre-cache all elements if addToCache is available
+      if (viewerApi.addToCache && allGlobalIdsToCache.length > 0) {
+        console.log(`Pre-caching ${allGlobalIdsToCache.length} elements...`);
+        try {
+          await viewerApi.addToCache(allGlobalIdsToCache);
+          console.log('Pre-caching complete!');
+        } catch (err) {
+          console.warn('Failed to pre-cache elements:', err);
+        }
+      }
+
       const extractedQuantities: QuantityItem[] = [];
       let processedElements = 0;
 
@@ -448,39 +485,69 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
                     IsDefinedBy: itemData.IsDefinedBy,
                     IsDefinedByLength: Array.isArray(itemData.IsDefinedBy) ? itemData.IsDefinedBy.length : 0
                   });
+                  
+                  // Debug: Log the full IsDefinedBy structure to see what properties are available
+                  if (Array.isArray(itemData.IsDefinedBy) && itemData.IsDefinedBy.length > 0) {
+                    console.log('First property set structure:', itemData.IsDefinedBy[0]);
+                    console.log('Property set Name:', itemData.IsDefinedBy[0].Name);
+                    if (itemData.IsDefinedBy[0].HasProperties && itemData.IsDefinedBy[0].HasProperties.length > 0) {
+                      console.log('First 3 raw properties:', itemData.IsDefinedBy[0].HasProperties.slice(0, 3));
+                      console.log('First property keys:', Object.keys(itemData.IsDefinedBy[0].HasProperties[0]));
+                    }
+                  }
+                  
+                  // Debug: Log root attributes
+                  console.log('Root attributes:', {
+                    ObjectType: (itemData as any).ObjectType,
+                    PredefinedType: (itemData as any).PredefinedType,
+                    Tag: (itemData as any).Tag,
+                    Name: (itemData as any).Name,
+                    Description: (itemData as any).Description
+                  });
                 }
                 
                 // Get GlobalId
                 const globalId = unwrapValue((itemData as any)._guid);
                 
-                // Extract object type using getElementProps for proper pset access
-                // NOTE: getItemsDataByModel returns raw IFC structure without property names
-                // but getElementProps gives us flat psets structure with accessible property names
+                if (processedElements === 1) {
+                  console.log('=== OPTIMIZED EXTRACTION (using pre-cached getElementProps) ===');
+                  console.log('Elements are pre-cached, so getElementProps calls are fast');
+                }
+                
+                // Extract object type and properties using getElementProps
+                // NOTE: Elements are pre-cached, so this should be very fast (reading from cache)
                 let objectType: string | undefined;
+                let elementProps: any = null;
                 
                 try {
-                  // Fetch element properties to get flat psets structure
-                  const elementProps = await viewerApi.getElementProps(globalId);
+                  // Fetch element properties from cache (fast!)
+                  elementProps = await viewerApi.getElementProps(globalId);
                   
-                  // Debug first element
                   if (processedElements === 1) {
-                    console.log('=== ELEMENT PROPS STRUCTURE ===');
-                    console.log('psets:', elementProps.psets);
-                    console.log('attributes:', elementProps.attributes);
+                    console.log('First element props structure:', {
+                      psets: elementProps?.psets ? Object.keys(elementProps.psets) : [],
+                      attributes: elementProps?.attributes ? Object.keys(elementProps.attributes) : []
+                    });
+                    
+                    // Debug: Show all properties in NV_PSteel pset to find where HEB450 is stored
+                    if (elementProps?.psets?.NV_PSteel) {
+                      console.log('NV_PSteel properties:', elementProps.psets.NV_PSteel);
+                    }
                   }
                   
-                  // 1. Check property sets (psets) - this is where object type is stored
-                  if (elementProps.psets) {
+                  // 1. Check property sets (psets) - this is where object type is usually stored
+                  if (elementProps?.psets) {
                     for (const psetName in elementProps.psets) {
                       const pset = elementProps.psets[psetName];
                       if (pset && typeof pset === 'object') {
-                        // Look for Description, Type, or Profile in pset
+                        // Look for Description, Type, Profile, or similar fields
                         objectType = (pset as any).Description ||
                                     (pset as any).Type ||
                                     (pset as any).Profile ||
                                     (pset as any).ObjectType ||
                                     (pset as any).PredefinedType ||
                                     (pset as any).Reference;
+                        
                         if (objectType && typeof objectType === 'string' && objectType.trim()) {
                           if (processedElements <= 3) {
                             console.log(`Found object type "${objectType}" from pset "${psetName}"`);
@@ -492,13 +559,14 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
                   }
                   
                   // 2. Check root attributes as fallback
-                  if (!objectType && elementProps.attributes) {
+                  if (!objectType && elementProps?.attributes) {
                     const attrs = elementProps.attributes as Record<string, any>;
                     objectType = attrs.ObjectType || 
                                 attrs.PredefinedType || 
                                 attrs.Tag ||
                                 attrs.Description ||
                                 attrs.Name;
+                    
                     if (objectType && typeof objectType === 'string' && processedElements <= 3) {
                       console.log(`Found object type "${objectType}" from attributes`);
                     }
@@ -512,8 +580,8 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
                   console.log(`Element ${processedElements} - Object Type Extraction:`, {
                     ifcClass,
                     objectType,
-                    fromPsets: Array.isArray(itemData.IsDefinedBy) ? 'checked' : 'not available',
-                    fallbackUsed: !Array.isArray(itemData.IsDefinedBy)
+                    hasPsets: elementProps?.psets ? Object.keys(elementProps.psets).length : 0,
+                    hasAttributes: elementProps?.attributes ? Object.keys(elementProps.attributes).length : 0
                   });
                 }
                 
@@ -571,39 +639,43 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
                   });
                 }
 
-                // Extract quantity using mapped property
+                // Extract quantity using mapped property from elementProps (cached, so fast!)
                 let quantity = 0;
                 let unit: string = matchedItem?.unit || 'pcs';
 
-                if (mapping?.quantityProperty) {
-                  // Extract from IsDefinedBy array structure
+                if (mapping?.quantityProperty && elementProps) {
                   const propertyPath = mapping.quantityProperty;
                   const parts = propertyPath.split('.');
                   
-                  if (Array.isArray(itemData.IsDefinedBy) && parts.length === 2) {
+                  if (parts.length === 2 && elementProps.psets) {
                     const [psetName, propName] = parts;
                     
-                    // Find the property set
-                    for (const pset of itemData.IsDefinedBy) {
-                      const psetNameValue = unwrapValue(pset.Name) || unwrapValue(pset._category);
+                    // Look in the specified property set
+                    const pset = elementProps.psets[psetName];
+                    if (pset && typeof pset === 'object') {
+                      const value = (pset as any)[propName];
+                      quantity = typeof value === 'number' ? value : (typeof value === 'string' ? parseFloat(value) || 0 : 0);
                       
-                      if (psetNameValue === psetName && pset.HasProperties) {
-                        // Find the property
-                        for (const prop of pset.HasProperties) {
-                          const propNameValue = unwrapValue(prop.Name) || unwrapValue(prop._category);
-                          if (propNameValue === propName) {
-                            const value = unwrapValue(prop.NominalValue) || unwrapValue(prop.value);
-                            quantity = typeof value === 'number' ? value : (typeof value === 'string' ? parseFloat(value) || 0 : 0);
-                            break;
-                          }
-                        }
-                        if (quantity > 0) break;
+                      if (processedElements <= 3) {
+                        console.log(`Found quantity property ${propertyPath} = ${quantity}`);
                       }
+                    }
+                  } else if (parts.length === 1 && elementProps.attributes) {
+                    // Single property name - check attributes
+                    const propName = parts[0];
+                    const value = (elementProps.attributes as any)[propName];
+                    quantity = typeof value === 'number' ? value : (typeof value === 'string' ? parseFloat(value) || 0 : 0);
+                    
+                    if (processedElements <= 3) {
+                      console.log(`Found quantity from attribute ${propName} = ${quantity}`);
                     }
                   }
                   
                   if (quantity === 0 && processedElements <= 3) {
-                    console.warn(`Property ${propertyPath} not found or zero for ${ifcClass}`);
+                    console.warn(`Property ${propertyPath} not found or zero for ${ifcClass}`, {
+                      availablePsets: elementProps?.psets ? Object.keys(elementProps.psets) : [],
+                      samplePset: elementProps?.psets ? Object.entries(elementProps.psets)[0] : null
+                    });
                   }
                 } else {
                   // No mapping configured - default to count
@@ -615,8 +687,10 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
                   unit = matchedItem.unit;
                 }
 
+                // Calculate costs
+                // Note: laborCost in CostItem is already the hourly rate × hours per unit
                 const materialCost = matchedItem ? matchedItem.materialCost * quantity : 0;
-                const laborCost = matchedItem ? matchedItem.laborCost * (matchedItem.laborHours * quantity) : 0;
+                const laborCost = matchedItem ? matchedItem.laborCost * quantity : 0;
                 const totalCost = materialCost + laborCost;
 
                 extractedQuantities.push({
@@ -691,6 +765,225 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
       alert('Failed to extract quantities. See console for details.');
     } finally {
       setIsExtracting(false);
+    }
+  };
+
+  // Recalculate costs based on current cost database without re-extracting quantities
+  const recalculateCosts = () => {
+    if (quantities.length === 0) {
+      console.warn('No quantities to recalculate');
+      return;
+    }
+
+    console.log('Recalculating costs with updated cost database...');
+    
+    // Recalculate costs for each quantity item
+    const updatedQuantities = quantities.map(item => {
+      // Find the current cost item in the database
+      const currentCostItem = item.matchedCostItem 
+        ? costData.find(c => c.wbsCode === item.matchedCostItem!.wbsCode)
+        : undefined;
+
+      if (currentCostItem) {
+        // Recalculate costs with updated rates
+        const materialCost = currentCostItem.materialCost * item.quantity;
+        const laborCost = currentCostItem.laborCost * item.quantity;
+        const totalCost = materialCost + laborCost;
+
+        return {
+          ...item,
+          matchedCostItem: currentCostItem,
+          materialCost,
+          laborCost,
+          totalCost
+        };
+      }
+
+      return item;
+    });
+
+    setQuantities(updatedQuantities);
+
+    // Recalculate grouped quantities
+    const grouped = new Map<string, GroupedQuantity>();
+    updatedQuantities.forEach(item => {
+      const key = item.matchedCostItem?.wbsCode || `UNMAPPED_${item.ifcClass}`;
+      
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          wbsCode: item.matchedCostItem?.wbsCode || `[UNMAPPED] ${item.ifcClass}`,
+          description: item.matchedCostItem?.description || `Not mapped to cost database`,
+          unit: item.matchedCostItem?.unit || item.unit,
+          elementCount: 0,
+          totalQuantity: 0,
+          materialCost: 0,
+          laborCost: 0,
+          totalCost: 0,
+          items: []
+        });
+      }
+      
+      const group = grouped.get(key)!;
+      group.elementCount++;
+      group.totalQuantity += item.quantity;
+      group.materialCost += item.materialCost || 0;
+      group.laborCost += item.laborCost || 0;
+      group.totalCost += item.totalCost || 0;
+      group.items.push(item);
+    });
+
+    setGroupedQuantities(Array.from(grouped.values()));
+    console.log('Cost recalculation complete!');
+  };
+
+  // Auto-recalculate costs when cost database changes
+  useEffect(() => {
+    if (quantities.length > 0 && costData.length > 0) {
+      recalculateCosts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [costData]);
+
+  // Export to XLSX
+  const exportToXLSX = async () => {
+    try {
+      const workbook = new XLSX.Workbook();
+      
+      // Summary sheet
+      const summarySheet = workbook.addWorksheet('Summary');
+      summarySheet.columns = [
+        { header: 'WBS Code', key: 'wbsCode', width: 15 },
+        { header: 'Description', key: 'description', width: 40 },
+        { header: 'Unit', key: 'unit', width: 10 },
+        { header: 'Element Count', key: 'elementCount', width: 15 },
+        { header: 'Total Quantity', key: 'totalQuantity', width: 15 },
+        { header: 'Material Cost', key: 'materialCost', width: 15 },
+        { header: 'Labor Cost', key: 'laborCost', width: 15 },
+        { header: 'Total Cost', key: 'totalCost', width: 15 }
+      ];
+
+      // Style header row
+      summarySheet.getRow(1).font = { bold: true };
+      summarySheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF4472C4' }
+      };
+
+      // Add grouped data
+      groupedQuantities.forEach(group => {
+        summarySheet.addRow({
+          wbsCode: group.wbsCode,
+          description: group.description,
+          unit: group.unit,
+          elementCount: group.elementCount,
+          totalQuantity: group.totalQuantity,
+          materialCost: group.materialCost,
+          laborCost: group.laborCost,
+          totalCost: group.totalCost
+        });
+      });
+
+      // Format currency columns
+      ['F', 'G', 'H'].forEach(col => {
+        summarySheet.getColumn(col).numFmt = '$#,##0.00';
+      });
+
+      // Detail sheet
+      const detailSheet = workbook.addWorksheet('Details');
+      detailSheet.columns = [
+        { header: 'Element ID', key: 'elementId', width: 25 },
+        { header: 'IFC Class', key: 'ifcClass', width: 20 },
+        { header: 'Description', key: 'description', width: 40 },
+        { header: 'Quantity', key: 'quantity', width: 12 },
+        { header: 'Unit', key: 'unit', width: 10 },
+        { header: 'WBS Code', key: 'wbsCode', width: 15 },
+        { header: 'Material Cost', key: 'materialCost', width: 15 },
+        { header: 'Labor Cost', key: 'laborCost', width: 15 },
+        { header: 'Total Cost', key: 'totalCost', width: 15 }
+      ];
+
+      // Style header row
+      detailSheet.getRow(1).font = { bold: true };
+      detailSheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF4472C4' }
+      };
+
+      // Add detail data
+      quantities.forEach(item => {
+        detailSheet.addRow({
+          elementId: item.elementId,
+          ifcClass: item.ifcClass,
+          description: item.description,
+          quantity: item.quantity,
+          unit: item.unit,
+          wbsCode: item.matchedCostItem?.wbsCode || '[UNMAPPED]',
+          materialCost: item.materialCost || 0,
+          laborCost: item.laborCost || 0,
+          totalCost: item.totalCost || 0
+        });
+      });
+
+      // Format currency columns
+      ['G', 'H', 'I'].forEach(col => {
+        detailSheet.getColumn(col).numFmt = '$#,##0.00';
+      });
+
+      // Generate file
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `QTO_Export_${new Date().toISOString().split('T')[0]}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to export XLSX:', error);
+      alert('Failed to export to Excel. See console for details.');
+    }
+  };
+
+  // Export to CSV
+  const exportToCSV = () => {
+    try {
+      // Create CSV content with BOM for UTF-8
+      const BOM = '\ufeff';
+      
+      // Summary CSV
+      let summaryCSV = BOM + 'WBS Code,Description,Unit,Element Count,Total Quantity,Material Cost,Labor Cost,Total Cost\n';
+      groupedQuantities.forEach(group => {
+        summaryCSV += `"${group.wbsCode}","${group.description}","${group.unit}",${group.elementCount},${group.totalQuantity},${group.materialCost.toFixed(2)},${group.laborCost.toFixed(2)},${group.totalCost.toFixed(2)}\n`;
+      });
+
+      // Detail CSV
+      let detailCSV = BOM + 'Element ID,IFC Class,Description,Quantity,Unit,WBS Code,Material Cost,Labor Cost,Total Cost\n';
+      quantities.forEach(item => {
+        detailCSV += `"${item.elementId}","${item.ifcClass}","${item.description}",${item.quantity},"${item.unit}","${item.matchedCostItem?.wbsCode || '[UNMAPPED]'}",${(item.materialCost || 0).toFixed(2)},${(item.laborCost || 0).toFixed(2)},${(item.totalCost || 0).toFixed(2)}\n`;
+      });
+
+      // Download summary CSV
+      const summaryBlob = new Blob([summaryCSV], { type: 'text/csv;charset=utf-8;' });
+      const summaryUrl = URL.createObjectURL(summaryBlob);
+      const summaryLink = document.createElement('a');
+      summaryLink.href = summaryUrl;
+      summaryLink.download = `QTO_Summary_${new Date().toISOString().split('T')[0]}.csv`;
+      summaryLink.click();
+      URL.revokeObjectURL(summaryUrl);
+
+      // Download detail CSV
+      const detailBlob = new Blob([detailCSV], { type: 'text/csv;charset=utf-8;' });
+      const detailUrl = URL.createObjectURL(detailBlob);
+      const detailLink = document.createElement('a');
+      detailLink.href = detailUrl;
+      detailLink.download = `QTO_Details_${new Date().toISOString().split('T')[0]}.csv`;
+      detailLink.click();
+      URL.revokeObjectURL(detailUrl);
+    } catch (error) {
+      console.error('Failed to export CSV:', error);
+      alert('Failed to export to CSV. See console for details.');
     }
   };
 
@@ -925,9 +1218,17 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
                     {showGrouped ? `${groupedQuantities.length} WBS Codes` : `${quantities.length} Elements`} | 
                     Total Cost: ${quantities.reduce((sum, q) => sum + (q.totalCost || 0), 0).toFixed(2)}
                   </Typography>
-                  <Button size="small" onClick={() => setShowGrouped(!showGrouped)}>
-                    {showGrouped ? 'Show Individual' : 'Show Grouped'}
-                  </Button>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Button size="small" variant="outlined" onClick={exportToXLSX}>
+                      Export XLSX
+                    </Button>
+                    <Button size="small" variant="outlined" onClick={exportToCSV}>
+                      Export CSV
+                    </Button>
+                    <Button size="small" onClick={() => setShowGrouped(!showGrouped)}>
+                      {showGrouped ? 'Show Individual' : 'Show Grouped'}
+                    </Button>
+                  </Box>
                 </Box>
 
                 {showGrouped ? (
