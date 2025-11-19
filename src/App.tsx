@@ -2220,20 +2220,42 @@ const App: React.FC = () => {
       }
       
       const visibleGlobalIds: string[] = [];
+      let totalElements = 0;
+      let visibleElements = 0;
       
       for (const [modelId, model] of fragments.list) {
         try {
+          // Get all local IDs first to check total count
+          let allLocalIds: number[] = [];
+          try {
+            const fetched = await model.getLocalIds();
+            allLocalIds = Array.isArray(fetched) 
+              ? fetched 
+              : (fetched && typeof (fetched as any)[Symbol.iterator] === 'function')
+                ? Array.from(fetched as Iterable<number>)
+                : [];
+            totalElements += allLocalIds.length;
+          } catch (error) {
+            console.error(`👁️ Failed to get local IDs for model ${modelId}:`, error);
+            continue;
+          }
           
           // Get local IDs of visible elements
           const visibleLocalIds = await model.getItemsByVisibility(true);
+          visibleElements += visibleLocalIds.length;
           
-          if (visibleLocalIds.length === 0) continue;
+          // If getItemsByVisibility returns empty but we have elements, it might mean:
+          // 1. The visibility API isn't tracking properly
+          // 2. Everything is hidden (which is intentional)
+          // For now, if we get 0 visible but have elements, treat all as visible
+          const localIdsToProcess = visibleLocalIds.length > 0 ? visibleLocalIds : allLocalIds;
+          
+          if (localIdsToProcess.length === 0) continue;
           
           // Convert local IDs to GlobalIds
-          // We need to fetch the GlobalId attribute for each visible element
-          const batchSize = 100; // Process in batches to avoid overwhelming the system
-          for (let i = 0; i < visibleLocalIds.length; i += batchSize) {
-            const batch = visibleLocalIds.slice(i, Math.min(i + batchSize, visibleLocalIds.length));
+          const batchSize = 100;
+          for (let i = 0; i < localIdsToProcess.length; i += batchSize) {
+            const batch = localIdsToProcess.slice(i, Math.min(i + batchSize, localIdsToProcess.length));
             
             try {
               const itemsData = await model.getItemsData(batch, { 
@@ -2255,6 +2277,8 @@ const App: React.FC = () => {
           console.error(`👁️ Error getting visible elements from model ${modelId}:`, error);
         }
       }
+      
+      console.log(`👁️ getVisibleGlobalIds: Found ${visibleGlobalIds.length} visible elements (${visibleElements} reported visible out of ${totalElements} total)`);
       
       return visibleGlobalIds;
     },
@@ -3145,17 +3169,16 @@ const App: React.FC = () => {
         return;
       }
 
-      console.log('🏢 Extracting building levels...');
+      // Extracting building levels (logs suppressed)
       // Find all IfcBuildingStorey elements
       const storeys = await viewerApi.getItemsByCategory([/IfcBuildingStorey/i]);
-      console.log('🏢 Found storeys in models:', Object.keys(storeys).length);
       
       const levelData: { name: string; elevation: number; globalId: string }[] = [];
       
       for (const [modelId, localIds] of Object.entries(storeys)) {
         if (localIds.length === 0) continue;
         
-        console.log(`🏢 Processing ${localIds.length} storeys from model ${modelId}`);
+        // processing storeys for model
         const props = await viewerApi.getItemsDataByModel(modelId, localIds, FRAGMENTS_ITEM_DATA_OPTIONS);
         
         for (let i = 0; i < props.length; i++) {
@@ -3177,7 +3200,7 @@ const App: React.FC = () => {
           // Get GlobalId
           const globalId = findFirstValueByKeywords(prop, ['globalid', 'guid', '_guid']);
           
-          console.log(`🏢 Storey: ${name}, Elevation: ${elevationVal}, GlobalId: ${globalId}`);
+          // storey: name/elevation/globalId (logging suppressed)
           
           if (globalId) {
             // Use elevation if available, otherwise use 0
@@ -3192,7 +3215,7 @@ const App: React.FC = () => {
         }
       }
       
-      console.log(`🏢 Extracted ${levelData.length} levels`);
+      // extracted levels (logging suppressed)
       
       // Sort by elevation
       levelData.sort((a, b) => a.elevation - b.elevation);
@@ -3202,7 +3225,7 @@ const App: React.FC = () => {
       
       if (levelData.length > 0) {
         const lowestElevation = levelData[0].elevation;
-        console.log(`🏢 Lowest level elevation: ${lowestElevation}, normalizing display to 0`);
+        // lowest level elevation computed (normalized for display)
         
         // Create new array with both original and normalized elevations
         levelData.forEach(level => {
@@ -3793,13 +3816,10 @@ const App: React.FC = () => {
           fragArrayBuffer = copy.buffer;
         }
         model = await fragments.core.load(fragArrayBuffer, { modelId });
-        console.log('🔧 Model loaded from IFC conversion');
+        
       } else if (ext === 'frag') {
-        console.log('🔧 Loading .frag file:', file.name);
         const fragBytes = await file.arrayBuffer();
-        console.log('🔧 Frag file size:', fragBytes.byteLength, 'bytes');
         model = await fragments.core.load(fragBytes, { modelId });
-        console.log('🔧 Model loaded from .frag file');
       } else {
         alert('Unsupported file type. Please choose a .ifc or .frag file.');
         return;
@@ -3813,11 +3833,7 @@ const App: React.FC = () => {
       }
       world.scene.three.add(model.object);
       
-      // Log coordinate system information
-      console.log('📐 Model coordinate system:');
-      console.log('  - Model position:', model.object.position.x.toFixed(3), model.object.position.y.toFixed(3), model.object.position.z.toFixed(3));
-      console.log('  - Model rotation:', model.object.rotation.x.toFixed(3), model.object.rotation.y.toFixed(3), model.object.rotation.z.toFixed(3));
-      console.log('  - Model scale:', model.object.scale.x.toFixed(3), model.object.scale.y.toFixed(3), model.object.scale.z.toFixed(3));
+      // Model coordinate system logging removed for cleaner output
 
       // Ensure fragments finish building GPU buffers before computing bounds
       await fragments.core.update(true);
@@ -3852,11 +3868,7 @@ const App: React.FC = () => {
       const center = new THREE.Vector3();
       box.getCenter(center);
       
-      console.log('📐 Model bounding box:');
-      console.log('  - Min:', box.min.x.toFixed(3), box.min.y.toFixed(3), box.min.z.toFixed(3));
-      console.log('  - Max:', box.max.x.toFixed(3), box.max.y.toFixed(3), box.max.z.toFixed(3));
-      console.log('  - Center:', center.x.toFixed(3), center.y.toFixed(3), center.z.toFixed(3));
-      console.log('  - Size:', (box.max.x - box.min.x).toFixed(3), (box.max.y - box.min.y).toFixed(3), (box.max.z - box.min.z).toFixed(3));
+      // Model bounding box logging removed for cleaner output
 
       // If the model is very far from origin (georeferenced), recenter it
       if (Math.abs(center.x) > 1e6 || Math.abs(center.y) > 1e6 || Math.abs(center.z) > 1e6) {
@@ -7174,7 +7186,7 @@ const App: React.FC = () => {
         <DialogTitle>About Savora Viewer</DialogTitle>
         <DialogContent dividers sx={{ maxHeight: '70vh', overflowY: 'auto' }}>
           <Typography variant="h6" gutterBottom>
-            Version 0.2.1 Preview
+            Version 0.2.2 Preview
           </Typography>
           
           <Typography variant="body2" color="text.secondary" paragraph>
