@@ -77,9 +77,16 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
   const selectedItemJson = useMemo(() => {
     if (!selectedItemData) return null;
     try {
+      // Create a shallow copy to avoid modifying the original
+      const safeData = { ...selectedItemData };
+      
+      // Remove potentially massive fields that cause RangeError
+      const keysToRemove = ['geometry', 'expressID', 'bits', 'handle', 'buffer'];
+      keysToRemove.forEach(key => delete safeData[key]);
+
       const seen = new WeakSet();
       return JSON.stringify(
-        selectedItemData,
+        safeData,
         (key, value) => {
           if (typeof value === 'bigint') {
             return value.toString();
@@ -90,13 +97,17 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
             }
             seen.add(value);
           }
+          // Truncate long strings
+          if (typeof value === 'string' && value.length > 1000) {
+            return value.substring(0, 1000) + '... (truncated)';
+          }
           return value;
         },
         2
       );
     } catch (error) {
       console.warn('Failed to stringify selected item data for IDS creator inspector', error);
-      return 'Unable to display selected element properties.';
+      return 'Unable to display selected element properties (Data too large).';
     }
   }, [selectedItemData]);
 
