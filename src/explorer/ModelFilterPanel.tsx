@@ -109,7 +109,7 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
       return value;
     }
     
-    // Property set path (e.g., "NV_PSteel.NV_STATUS")
+    // Property set path (e.g., "Pset_Steel, STATUS")
     // Following ThatOpen example: IsDefinedBy is an array at item level
     const [psetName, propName] = parts;
     
@@ -569,7 +569,7 @@ export default function ModelFilterPanel({ open, onClose, viewerApi }: ModelFilt
                   <TextField
                     {...params}
                     label="Property Path"
-                    helperText="e.g., NV_PSteel.NV_STATUS or Pset_WallCommon.FireRating"
+                    helperText="e.g., Pset_Steel. Pset_STATUS or Pset_WallCommon.FireRating"
                     InputProps={{
                       ...params.InputProps,
                       endAdornment: (

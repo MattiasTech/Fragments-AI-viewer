@@ -6119,7 +6119,7 @@ const App: React.FC = () => {
                               }}
                             >
                               <Typography variant="body2" color="text.secondary">
-                                Select an element in the viewer to view its Property Sets / NV_BIM / … breakdown.
+                                Select an element in the viewer to view its Property Sets… breakdown.
                               </Typography>
                             </Paper>
                           ) : hasSelectionSearch ? (
