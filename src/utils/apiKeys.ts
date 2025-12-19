@@ -13,10 +13,6 @@ export interface ApiConfig {
   model?: string;
 }
 
-/**
- * Simple obfuscation to avoid plaintext storage
- * Note: This is NOT encryption, just basic obfuscation
- */
 const obfuscate = (text: string): string => {
   try {
     return btoa(text);
