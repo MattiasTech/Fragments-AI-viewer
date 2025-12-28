@@ -1,4 +1,4 @@
-import{cm as i,co as e,cH as K,cF as O,cp as y,cq as k,cs as P,dj as U,dk as X,dl as J,dm as Q,cO as _,cA as W,dn as V,cP as Z}from"./vendor-CbOrIqGz.js";import{l as Y,s as ee,a as te}from"./index-CDDEq_cA.js";import"./thatopen-vendor-89_NjnSE.js";import"./three-vendor-kQcUiZz9.js";const se=`You can control the BIM viewer selection with a structured command.
+import{cm as i,co as e,cH as K,cF as O,cp as y,cq as k,cs as P,dj as U,dk as X,dl as J,dm as Q,cO as _,cA as W,dn as V,cP as Z}from"./vendor-CbOrIqGz.js";import{l as Y,s as ee,a as te}from"./index-BHVveOoM.js";import"./thatopen-vendor-89_NjnSE.js";import"./three-vendor-kQcUiZz9.js";const se=`You can control the BIM viewer selection with a structured command.
 When the user explicitly asks you to select, highlight, filter, show, hide, isolate, or focus objects, append a single line at the end of your reply in this exact format:
 SELECTION: {"action":"select","filter":{...},"mode":"highlight"}
 Use "action":"clear" when the user wants to clear selections.
