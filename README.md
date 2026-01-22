@@ -4,13 +4,12 @@ A powerful web-based 3D viewer for BIM models with integrated IDS (Information D
 
 **All data is processed locally in the user's browser (PC, phone, tablet, etc.). Exception: AI Chat sends data to the configured AI provider. If AI Chat is not used, no model data leaves the user's device.** 
 
-## Recent Changes
+## Recent Changes (v0.2.3)
 
-- **Grid alignment fixes (ThatOpen coordinates):** Grid placement now follows That Open's IFC coordinate system using `model.getCoordinates()` so grids align precisely with IFC storey elevations.
-- **Grid controls updated:** Grid settings use a visibility toggle and an offset slider (no color picker). You can select storeys and apply an offset from the storey bottom.
-- **IDS "Visible only" fixed:** The IDS checker now correctly runs when validating only visible elements; viewer fallbacks ensure checks proceed when visibility queries return empty by default.
-- **Debug logs removed:** Development console logs used during debugging were cleaned up for a quieter console in production builds.
-- **Bumped version:** Package version set to `0.2.2` (see `package.json`).
+- **Parametric Filter 2.0:** Complete architecture rebuild. Features cascading dropdowns (dependent values), robust property fetching (Standard + Psets), and saved configurations.
+- **UI Enhancements:** Resizable panels for Filter and IDS tools. Corrected z-index layering for dialogs and dropdowns.
+- **IDS Creator Update:** "Edit Requirement" dropdowns now auto-populate with values from the selected example object.
+- **Bug Fixes:** Resolved issues with "Category only" filtering and boolean logic in rules.
 
 ## Usage Guide
 
@@ -104,10 +103,7 @@ npm run deploy
 - **AI Assistant**: Requires valid Google Gemini API key or OpenAI API key and internet connection. Responses depend on API availability and rate limits.
 
 ## Troubleshooting
-
-### Model Loading Issues
-  - Check browser console for specific error messages.
-  
+ 
 - **Properties not showing**:
   - Some IFC files may have incomplete or non-standard property structures.
   - Try clicking different elements to ensure proper selection.
@@ -119,7 +115,6 @@ npm run deploy
   
 - **Elements not highlighting**:
   - Some older `.frag` files may not support highlighting.
-  - Check console for warnings about highlight capabilities.
 
 ### Key Technologies
 - **React 18** with TypeScript for UI components
@@ -130,13 +125,14 @@ npm run deploy
 - **Zustand** for lightweight state management
 - **IndexedDB** for client-side IDS data persistence
 - **Web Workers** for non-blocking validation and property extraction
-- **OpenAI API** for AI-powered assistance
+- **AI API:s** for AI-powered assistance
 
 ## Roadmap
 
 Planned features and improvements:
 
 - [ ] **QTO**: Extract QTO from the model and add cost and labor hours.
+- [ ] **MCP**: Use MCP server to feed LLM with information in a more efficient way then trad.
 
 ## Contributing
 

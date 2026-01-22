@@ -86,6 +86,7 @@ export interface ViewerApi {
   // On-demand property loading (ThatOpen pattern)
   getItemsData?(globalIds: string[], config?: ItemsDataConfig): Promise<ItemData[]>;
   getItemsByCategory?(categories: RegExp[]): Promise<Record<string, number[]>>;
+  getLoadedCategories?(): Promise<string[]>; // Get all IFC types present in loaded models
   getItemsDataByModel?(modelId: string, localIds: number[], config?: ItemsDataConfig): Promise<ItemData[]>;
   iterElements(options?: { batchSize?: number }): AsyncIterable<
     Array<{

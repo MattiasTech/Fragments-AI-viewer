@@ -3060,6 +3060,62 @@ const App: React.FC = () => {
       
       return results;
     },
+    getLoadedCategories: async () => {
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        return [];
+      }
+      
+      const types = new Set<string>();
+      
+      // Since we don't have easy access to the TypeID->String map here without importing web-ifc explicitly,
+      // and we want this to be robust:
+      // We will do a full scan of ALL common types efficiently.
+      
+      const found: string[] = [];
+      const KNOWN_IFC_TYPES_ALL = [
+        'IfcWall', 'IfcWallStandardCase', 'IfcSlab', 'IfcRoof', 'IfcWindow', 'IfcDoor', 'IfcColumn', 'IfcBeam',
+        'IfcStair', 'IfcStairFlight', 'IfcRailing', 'IfcCurtainWall', 'IfcPlate', 'IfcMember',
+        'IfcBuildingElementProxy', 'IfcFurnishingElement', 'IfcFlowTerminal', 'IfcSpace',
+        'IfcDuctSegment', 'IfcPipeSegment', 'IfcFlowFitting', 'IfcFlowController', 'IfcDiscreteAccessory',
+        'IfcSite', 'IfcBuilding', 'IfcBuildingStorey', 'IfcGroup', 'IfcZone', 'IfcSystem', 'IfcDistributionSystem',
+        'IfcProject', 'IfcOpeningElement', 'IfcAnnotation', 'IfcGrid', 'IfcCovering', 'IfcFooting', 'IfcPile',
+        'IfcRamp', 'IfcRampFlight', 'IfcFlowSegment', 'IfcFlowStorageDevice', 'IfcFlowMovingDevice',
+        'IfcFlowTreatmentDevice', 'IfcEnergyConversionDevice', 'IfcCivilElement', 'IfcGeographicElement',
+        'IfcVirtualElement'
+      ];
+      
+      // We will perform a massive check. It is fast because it's just index lookups.
+      const promises = [];
+      // Group by regex to minimize calls? Actually `getItemsOfCategories` takes array of regex.
+      // We can pass ONE array of regexes for ALL types to `getItemsOfCategories`.
+      // It returns matching items. But we want to know WHICH regex matched.
+      // `getItemsOfCategories` returns { [id: string]: number[] }? No.
+      
+      // Let's simplify: Check each type individually, but in parallel promises.
+      // The index lookup is instant.
+      
+      for (const type of KNOWN_IFC_TYPES_ALL) {
+        promises.push((async () => {
+             const regex = new RegExp(`^${type}$`, 'i');
+             for (const [_, model] of fragments.list) {
+                 try {
+                     const results = await model.getItemsOfCategories([regex]);
+                     // Check if any result
+                     if (results && Object.keys(results).length > 0) {
+                         // Double check it's not empty arrays
+                         const hasItems = Object.values(results).some((arr: any) => arr && arr.length > 0);
+                         if (hasItems) return type;
+                     }
+                 } catch (e) { }
+             }
+             return null;
+        })());
+      }
+      
+      const results = await Promise.all(promises);
+      return results.filter((t): t is string => t !== null).sort();
+    },
     getItemsByCategory: async (categories: RegExp[]) => {
       const fragments = fragmentsRef.current;
       if (!fragments) {
