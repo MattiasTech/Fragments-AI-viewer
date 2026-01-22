@@ -7242,7 +7242,7 @@ const App: React.FC = () => {
         <DialogTitle>About Savora Viewer</DialogTitle>
         <DialogContent dividers sx={{ maxHeight: '70vh', overflowY: 'auto' }}>
           <Typography variant="h6" gutterBottom>
-            Version 0.2.2 Preview
+            Version 0.2.3 Preview
           </Typography>
           
           <Typography variant="body2" color="text.secondary" paragraph>
