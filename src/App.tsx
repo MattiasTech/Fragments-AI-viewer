@@ -69,6 +69,7 @@ import type { SelectionCommand } from './ChatWindow';
 import { saveApiConfig, loadApiConfig, clearApiConfig, getAvailableModels, getDefaultModel, type AIProvider, type ApiConfig } from './utils/apiKeys';
 import { testGeminiConnection } from './ai/gemini';
 import { testOpenAIConnection } from './ai/openai';
+import { AIQueryEngine } from './ai/AIQueryEngine';
 const ChatWindow = React.lazy(() => import('./ChatWindow'));
 const IdsPanel = React.lazy(() => import('./ids/IdsPanel'));
 const IdsCreatorPanel = React.lazy(() => import('./ids/IdsCreatorPanel'));
@@ -1273,6 +1274,9 @@ const App: React.FC = () => {
   const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
+  // AI Config Version - triggers ChatWindow reload
+  const [aiConfigVersion, setAiConfigVersion] = useState(0);
+
   // Settings dialog state
   const [settingsProvider, setSettingsProvider] = useState<AIProvider>('disabled');
   const [settingsApiKey, setSettingsApiKey] = useState('');
@@ -1798,6 +1802,7 @@ const App: React.FC = () => {
       };
       saveApiConfig(config);
     }
+    setAiConfigVersion(v => v + 1);
     handleSettingsClose();
   }, [settingsProvider, settingsApiKey, settingsModel, handleSettingsClose]);
 
@@ -4309,13 +4314,31 @@ const App: React.FC = () => {
     };
   }, [stopExplorerResize]);
 
-  const getModelDataForAI = useCallback(async () => {
+  // Synchronize viewerApi with AIQueryEngine
+  useEffect(() => {
+    if (viewerApi) {
+      AIQueryEngine.getInstance().setViewerApi(viewerApi);
+      // Start indexing in background
+      AIQueryEngine.getInstance().indexModel();
+    }
+  }, [viewerApi]);
+
+  const getModelDataForAI = useCallback(async (question?: string) => {
     const fr = fragmentsRef.current;
     const lines: string[] = [];
 
     if (!fr || fr.list.size === 0 || models.length === 0) {
       lines.push('No models are currently loaded in the viewer.');
     } else {
+      // AI Query Engine Context
+      try {
+        const engineContext = await AIQueryEngine.getInstance().generateContext(question || '');
+        lines.push(engineContext);
+        lines.push('---');
+      } catch (e) {
+        console.warn('AI Engine not ready', e);
+      }
+
       lines.push(`Loaded models (${models.length}): ${models.map((m) => `${m.label} [${m.id}]`).join(', ')}`);
       lines.push(`Fragments models in memory: ${fr.list.size}`);
       try {
@@ -4399,57 +4422,6 @@ const App: React.FC = () => {
         } else {
           lines.push('  Properties for this selection are not available yet.');
         }
-      }
-    } else {
-      lines.push('No active selection — exporting properties for every loaded element.');
-      if (fr && fr.list.size) {
-        for (const info of models) {
-          const record = fr.list.get(info.id);
-          if (!record) {
-            lines.push(`Model ${info.label} [${info.id}] could not be found in the fragments registry.`);
-            continue;
-          }
-          try {
-            const retrievedIds = await record.getLocalIds();
-            const localIds = Array.isArray(retrievedIds)
-              ? retrievedIds
-              : retrievedIds
-                ? Array.from(retrievedIds as Iterable<number>)
-                : [];
-            if (!localIds || localIds.length === 0) {
-              lines.push(`Model ${info.label} [${info.id}] has no retrievable local IDs.`);
-              continue;
-            }
-            lines.push(`Model ${info.label} [${info.id}] — enumerating ${localIds.length} items:`);
-            const detailLimit = localIds.length <= 40 ? 12 : localIds.length <= 120 ? 6 : 3;
-            const chunkSize = 50;
-            for (let offset = 0; offset < localIds.length; offset += chunkSize) {
-              const chunk = localIds.slice(offset, offset + chunkSize);
-              let batch: any[] = [];
-              try {
-                batch = await record.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
-              } catch (err) {
-                const start = chunk[0];
-                const end = chunk[chunk.length - 1];
-                lines.push(`  Failed to retrieve properties for items ${start}–${end}: ${(err as any)?.message ?? err}`);
-                continue;
-              }
-              chunk.forEach((localId, position) => {
-                const data = batch?.[position];
-                if (!data) {
-                  lines.push(`- localId:${localId} (no data available)`);
-                  return;
-                }
-                const summary = summariseItemDataForAI(data, detailLimit).replace(/\s+/g, ' ').trim();
-                lines.push(`- localId:${localId} | ${summary}`);
-              });
-            }
-          } catch (err) {
-            lines.push(`Failed to enumerate items for model ${info.label} [${info.id}]: ${(err as any)?.message ?? err}`);
-          }
-        }
-      } else {
-        lines.push('Fragments data is not available to enumerate model items.');
       }
     }
 
@@ -7430,6 +7402,7 @@ const App: React.FC = () => {
             expandSignal={chatExpandSignal}
             onRequestSelection={handleAISelection}
             onOpenSettings={handleSettingsOpen}
+            configVersion={aiConfigVersion}
           />
         </Suspense>
 
