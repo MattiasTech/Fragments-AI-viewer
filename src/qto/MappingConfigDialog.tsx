@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import Dialog from '@mui/material/Dialog';
-import DialogTitle from '@mui/material/DialogTitle';
-import DialogContent from '@mui/material/DialogContent';
-import DialogActions from '@mui/material/DialogActions';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import Draggable from 'react-draggable';
+import Paper from '@mui/material/Paper';
+import CloseIcon from '@mui/icons-material/Close';
+import MinimizeIcon from '@mui/icons-material/Minimize';
+import OpenInFullIcon from '@mui/icons-material/OpenInFull';
 import Button from '@mui/material/Button';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
@@ -40,6 +41,7 @@ import {
   exportTemplateToJson,
   importTemplateFromJson
 } from './mapping.store';
+import { get, set } from 'idb-keyval';
 import { getUiSetting, setUiSetting } from '../utils/uiSettings';
 
 interface MappingConfigDialogProps {
@@ -73,11 +75,81 @@ export default function MappingConfigDialog({
   const [templateName, setTemplateName] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  // Load existing mappings and templates
+  // Window state
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [size, setSize] = useState({ width: 900, height: 700 });
+  const nodeRef = useRef<HTMLDivElement>(null);
+  const resizingRef = useRef(false);
+  const resizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
+
+  // Resizing logic
+  const onResizePointerMove = useCallback((event: PointerEvent) => {
+    if (!resizingRef.current || !resizeOriginRef.current) return;
+    const origin = resizeOriginRef.current;
+    
+    // Calculate new dimensions
+    const deltaX = event.clientX - origin.startX;
+    const deltaY = event.clientY - origin.startY;
+    
+    // Apply constraints
+    const nextWidth = Math.max(500, origin.width + deltaX);
+    const nextHeight = Math.max(400, origin.height + deltaY);
+    
+    setSize({ width: Math.round(nextWidth), height: Math.round(nextHeight) });
+  }, []);
+
+  const stopResize = useCallback(() => {
+    resizingRef.current = false;
+    resizeOriginRef.current = null;
+    window.removeEventListener('pointermove', onResizePointerMove);
+    window.removeEventListener('pointerup', stopResize);
+    document.body.style.cursor = '';
+  }, [onResizePointerMove]);
+
+  const handleResizeStart = useCallback((event: React.PointerEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    const node = nodeRef.current;
+    if (!node) return;
+    
+    resizingRef.current = true;
+    resizeOriginRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      width: node.offsetWidth,
+      height: node.offsetHeight
+    };
+    
+    document.body.style.cursor = 'nwse-resize';
+    window.addEventListener('pointermove', onResizePointerMove);
+    window.addEventListener('pointerup', stopResize);
+  }, [onResizePointerMove, stopResize]);
+
+  // Cleanup resize listeners
+  useEffect(() => {
+    return () => {
+      stopResize();
+    };
+  }, [stopResize]);
+
+  // Load existing mappings, templates, and cached scan data
   useEffect(() => {
     if (open) {
       loadMappings().then(setMappings);
       loadAllTemplates().then(setTemplates);
+
+      // Load cached scan data
+      get('qto_scan_cache').then((cache: any) => {
+        if (cache && cache.classes && cache.classes.length > 0) {
+          console.log('Restoring cached scan data', cache);
+          setAvailableIfcClasses(cache.classes);
+          setIfcClassCounts(cache.counts || {});
+          setObjectTypesByClass(cache.objectTypes || {});
+          setAvailablePropertiesByClass(cache.properties || {});
+          setSampleElementsByClass(cache.samples || {});
+        }
+      }).catch(err => console.error('Error loading scan cache:', err));
     }
   }, [open]);
 
@@ -420,6 +492,17 @@ export default function MappingConfigDialog({
       setObjectTypesByClass(objectTypes);
       setAvailablePropertiesByClass(properties);
       setSampleElementsByClass(sampleElements);
+
+      // Save to cache
+      const cache = {
+        classes,
+        counts,
+        objectTypes,
+        properties,
+        samples: sampleElements,
+        timestamp: Date.now()
+      };
+      set('qto_scan_cache', cache).catch(err => console.error('Error saving scan cache:', err));
       
       console.log('Scanned properties by class:', properties);
       
@@ -667,299 +750,374 @@ export default function MappingConfigDialog({
     input.click();
   };
 
+  if (!open) return null;
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
-      <DialogTitle>
-        Configure IFC to WBS Mapping
-      </DialogTitle>
-      
-      <DialogContent>
-        {error && (
-          <Alert severity="error" onClose={() => setError(null)} sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
-
-        <Box sx={{ mb: 2 }}>
-          <Typography variant="body2" color="text.secondary" gutterBottom>
-            Map IFC element types to your cost database items. You can map entire classes or specific object types (e.g., HEA200, HEB300) to different WBS codes for granular cost control.
-          </Typography>
-          
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 2, mb: 1 }}>
-            <FormControl size="small" sx={{ minWidth: 150 }}>
-              <InputLabel>Scan Scope</InputLabel>
-              <Select
-                value={scanScope}
-                label="Scan Scope"
-                onChange={(e) => {
-                  const newScope = e.target.value as 'all' | 'selected' | 'visible';
-                  setScanScope(newScope);
-                  // Persist the preference
-                  setUiSetting('qtoMappingScanScope', newScope);
-                  setAvailableIfcClasses([]);
-                  setIfcClassCounts({});
-                }}
-              >
-                <MenuItem value="selected">Selected Elements</MenuItem>
-                <MenuItem value="visible">Visible Elements</MenuItem>
-                <MenuItem value="all">All Elements</MenuItem>
-              </Select>
-            </FormControl>
-            
-            <Button
-              variant="outlined"
-              size="small"
-              onClick={scanModelForIfcClasses}
-              disabled={isScanning}
-              startIcon={isScanning ? <CircularProgress size={16} /> : undefined}
-            >
-              {isScanning ? 'Scanning...' : 'Scan Model'}
-            </Button>
-            
-            {availableIfcClasses.length > 0 && (
-              <Typography variant="body2" color="primary">
-                Found {availableIfcClasses.length} IFC classes
-              </Typography>
-            )}
-          </Box>
-        </Box>
-
-        {/* Template Management */}
-        <Box sx={{ mb: 2, p: 2, bgcolor: 'background.paper', border: 1, borderColor: 'divider', borderRadius: 1 }}>
-          <Typography variant="subtitle2" gutterBottom>Templates</Typography>
-          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1 }}>
-            {templates.map(template => (
-              <Chip
-                key={template.id}
-                label={`${template.name} (${template.mappings.length})`}
-                onClick={() => handleLoadTemplate(template.id)}
-                onDelete={() => handleDeleteTemplate(template.id)}
-                size="small"
-              />
-            ))}
-          </Box>
-          <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-            <TextField
-              size="small"
-              placeholder="Template name"
-              value={templateName}
-              onChange={(e) => setTemplateName(e.target.value)}
-              sx={{ flex: 1 }}
-            />
-            <Button size="small" startIcon={<SaveIcon />} onClick={handleSaveAsTemplate}>
-              Save as Template
-            </Button>
-            <Button size="small" startIcon={<FileDownloadIcon />} onClick={handleExportTemplate}>
-              Export
-            </Button>
-            <Button size="small" startIcon={<FileUploadIcon />} onClick={handleImportTemplate}>
-              Import
-            </Button>
-          </Box>
-        </Box>
-
-        {/* Mappings Table */}
-        <TableContainer sx={{ maxHeight: 400 }}>
-          <Table size="small" stickyHeader>
-            <TableHead>
-              <TableRow>
-                <TableCell width="16%">IFC Class</TableCell>
-                <TableCell width="14%">Object Type</TableCell>
-                <TableCell width="22%">Cost Item (WBS)</TableCell>
-                <TableCell width="28%">Quantity Property</TableCell>
-                <TableCell width="12%">Qty Type</TableCell>
-                <TableCell width="8%" align="center">
-                  <IconButton size="small" onClick={handleAddMapping} color="primary">
-                    <AddIcon />
-                  </IconButton>
-                </TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {mappings.map((mapping, index) => (
-                <TableRow key={index}>
-                  <TableCell>
-                    <FormControl fullWidth size="small">
-                      <Select
-                        value={mapping.ifcClass}
-                        onChange={(e) => handleMappingChange(index, 'ifcClass', e.target.value)}
-                        displayEmpty
-                      >
-                        <MenuItem value="">
-                          <em>Select IFC Class</em>
-                        </MenuItem>
-                        {availableIfcClasses.map(cls => (
-                          <MenuItem key={cls} value={cls}>
-                            {cls} {ifcClassCounts[cls] ? `(${ifcClassCounts[cls]} elements)` : ''}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </TableCell>
-                  <TableCell>
-                    <FormControl fullWidth size="small">
-                      <Select
-                        value={mapping.objectType || ''}
-                        onChange={(e) => handleMappingChange(index, 'objectType', e.target.value)}
-                        displayEmpty
-                        disabled={!mapping.ifcClass || !objectTypesByClass[mapping.ifcClass]?.length}
-                      >
-                        <MenuItem value="">
-                          <em>All Types</em>
-                        </MenuItem>
-                        {mapping.ifcClass && objectTypesByClass[mapping.ifcClass]?.map(type => (
-                          <MenuItem key={type} value={type}>
-                            {type}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    {mapping.ifcClass && objectTypesByClass[mapping.ifcClass]?.length > 0 && (
-                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-                        {objectTypesByClass[mapping.ifcClass].length} type{objectTypesByClass[mapping.ifcClass].length !== 1 ? 's' : ''} available
-                      </Typography>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <FormControl fullWidth size="small">
-                      <Select
-                        value={mapping.wbsCode}
-                        onChange={(e) => handleMappingChange(index, 'wbsCode', e.target.value)}
-                        displayEmpty
-                      >
-                        <MenuItem value="">
-                          <em>Select WBS Code</em>
-                        </MenuItem>
-                        {costItems.map(item => (
-                          <MenuItem key={item.wbsCode} value={item.wbsCode}>
-                            {item.wbsCode}: {item.description} ({item.unit})
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    {mapping.confidence && (
-                      <Typography variant="caption" color="text.secondary">
-                        AI Confidence: {(mapping.confidence * 100).toFixed(0)}%
-                      </Typography>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
-                      <FormControl fullWidth size="small">
-                        <Select
-                          value={mapping.quantityProperty || ''}
-                          onChange={(e) => handleMappingChange(index, 'quantityProperty', e.target.value)}
-                          displayEmpty
-                          disabled={!mapping.ifcClass || !mapping.wbsCode}
-                        >
-                          <MenuItem value="">
-                            <em>Select Property</em>
-                          </MenuItem>
-                          {mapping.ifcClass && availablePropertiesByClass[mapping.ifcClass]?.map(prop => (
-                            <MenuItem key={prop} value={prop}>
-                              {prop}
-                            </MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                      <IconButton 
-                        size="small" 
-                        onClick={() => handleAISuggestProperty(index)}
-                        disabled={!mapping.ifcClass || !mapping.wbsCode || isGeneratingAI || !sampleElementsByClass[mapping.ifcClass]}
-                        title="AI suggest property"
-                      >
-                        <AutoFixHighIcon />
-                      </IconButton>
-                    </Box>
-                    {mapping.ifcClass && availablePropertiesByClass[mapping.ifcClass] && (
-                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-                        {availablePropertiesByClass[mapping.ifcClass].length} properties available
-                      </Typography>
-                    )}
-                    {mapping.quantityProperty && (
-                      <Box sx={{ mt: 0.5 }}>
-                        <Typography variant="caption" color="success.main" display="block">
-                          ✓ Extract: {mapping.quantityProperty}
-                        </Typography>
-                        {mapping.quantityType && (
-                          <Chip
-                            label={`Type: ${mapping.quantityType}`}
-                            size="small"
-                            variant="outlined"
-                            sx={{ mt: 0.5, fontSize: '0.7rem' }}
-                            color={mapping.quantityType === 'length' ? 'info' : 
-                                   mapping.quantityType === 'area' ? 'warning' :
-                                   mapping.quantityType === 'volume' ? 'error' :
-                                   mapping.quantityType === 'weight' ? 'secondary' : 'default'}
-                          />
-                        )}
-                        {mapping.propertyConfidence && (
-                          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-                            Confidence: {(mapping.propertyConfidence * 100).toFixed(0)}%
-                          </Typography>
-                        )}
-                      </Box>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <FormControl fullWidth size="small">
-                      <Select
-                        value={mapping.quantityType || ''}
-                        onChange={(e) => handleMappingChange(index, 'quantityType', e.target.value)}
-                        displayEmpty
-                        disabled={!mapping.quantityProperty}
-                      >
-                        <MenuItem value="">
-                          <em>Auto</em>
-                        </MenuItem>
-                        <MenuItem value="length">📏 Length (m)</MenuItem>
-                        <MenuItem value="area">📐 Area (m²)</MenuItem>
-                        <MenuItem value="volume">📦 Volume (m³)</MenuItem>
-                        <MenuItem value="weight">⚖️ Weight (kg)</MenuItem>
-                        <MenuItem value="count">🔢 Count (pcs)</MenuItem>
-                      </Select>
-                    </FormControl>
-                    {mapping.quantityType && (
-                      <Typography variant="caption" color="info.main" display="block" sx={{ mt: 0.5 }}>
-                        ✓ Manual: {mapping.quantityType}
-                      </Typography>
-                    )}
-                  </TableCell>
-                  <TableCell align="center">
-                    <IconButton size="small" onClick={() => handleRemoveMapping(index)} color="error">
-                      <DeleteIcon />
-                    </IconButton>
-                  </TableCell>
-                </TableRow>
-              ))}
-              {mappings.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={6} align="center">
-                    <Typography variant="body2" color="text.secondary">
-                      No mappings defined. Click + to add or use AI Suggest.
-                    </Typography>
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </DialogContent>
-
-      <DialogActions>
-        <Button
-          startIcon={isGeneratingAI ? <CircularProgress size={16} /> : <AutoFixHighIcon />}
-          onClick={handleAISuggest}
-          disabled={isGeneratingAI || isScanning}
+    <Draggable nodeRef={nodeRef} handle=".mapping-dialog-header" bounds="parent">
+      <Paper
+        ref={nodeRef}
+        sx={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)', // Initial centering, but Draggable overrides transform
+          width: size.width,
+          height: isMinimized ? 'auto' : size.height,
+          maxHeight: isMinimized ? 'auto' : '90vh',
+          maxWidth: '90vw',
+          zIndex: 1350, // Higher than QTO panel
+          display: 'flex',
+          flexDirection: 'column',
+          // overflow: 'hidden', // REMOVED to allow dropdowns to escape if needed, though they use portals usually
+          boxSizing: 'border-box'
+        }}
+        elevation={24}
+      >
+        <Box
+          className="mapping-dialog-header"
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            p: 2,
+            borderBottom: 1,
+            borderColor: 'divider',
+            cursor: 'move',
+            bgcolor: 'background.paper'
+          }}
         >
-          {isGeneratingAI ? 'Generating...' : 'AI Suggest Mappings'}
-        </Button>
-        <Box sx={{ flex: 1 }} />
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={handleSave}>
-          Save & Apply
-        </Button>
-      </DialogActions>
-    </Dialog>
+          <Typography variant="h6">Configure IFC to WBS Mapping</Typography>
+          <Box>
+            <IconButton 
+              onClick={() => setIsMinimized(!isMinimized)} 
+              size="small" 
+              sx={{ color: 'inherit', mr: 1 }}
+              title={isMinimized ? 'Expand' : 'Minimize'}
+            >
+              {isMinimized ? <OpenInFullIcon /> : <MinimizeIcon />}
+            </IconButton>
+            <IconButton onClick={onClose} size="small" sx={{ color: 'inherit' }}>
+              <CloseIcon />
+            </IconButton>
+          </Box>
+        </Box>
+
+        {!isMinimized && (
+          <>
+            <Box sx={{ flex: 1, overflow: 'auto', p: 2 }}>
+              {error && (
+                <Alert severity="error" onClose={() => setError(null)} sx={{ mb: 2 }}>
+                  {error}
+                </Alert>
+              )}
+
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="body2" color="text.secondary" gutterBottom>
+                  Map IFC element types to your cost database items. You can map entire classes or specific object types (e.g., HEA200, HEB300) to different WBS codes for granular cost control.
+                </Typography>
+                
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 2, mb: 1 }}>
+                  <FormControl size="small" sx={{ minWidth: 150 }}>
+                    <InputLabel>Scan Scope</InputLabel>
+                    <Select
+                      value={scanScope}
+                      label="Scan Scope"
+                      onChange={(e) => {
+                        const newScope = e.target.value as 'all' | 'selected' | 'visible';
+                        setScanScope(newScope);
+                        // Persist the preference
+                        setUiSetting('qtoMappingScanScope', newScope);
+                        setAvailableIfcClasses([]);
+                        setIfcClassCounts({});
+                      }}
+                      MenuProps={{ style: { zIndex: 1400 } }}
+                    >
+                      <MenuItem value="selected">Selected Elements</MenuItem>
+                      <MenuItem value="visible">Visible Elements</MenuItem>
+                      <MenuItem value="all">All Elements</MenuItem>
+                    </Select>
+                  </FormControl>
+                  
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={scanModelForIfcClasses}
+                    disabled={isScanning}
+                    startIcon={isScanning ? <CircularProgress size={16} /> : undefined}
+                  >
+                    {isScanning ? 'Scanning...' : 'Scan Model'}
+                  </Button>
+                  
+                  {availableIfcClasses.length > 0 && (
+                    <Typography variant="body2" color="primary">
+                      Found {availableIfcClasses.length} IFC classes
+                    </Typography>
+                  )}
+                </Box>
+              </Box>
+
+              {/* Template Management */}
+              <Box sx={{ mb: 2, p: 2, bgcolor: 'background.paper', border: 1, borderColor: 'divider', borderRadius: 1 }}>
+                <Typography variant="subtitle2" gutterBottom>Templates</Typography>
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1 }}>
+                  {templates.map(template => (
+                    <Chip
+                      key={template.id}
+                      label={`${template.name} (${template.mappings.length})`}
+                      onClick={() => handleLoadTemplate(template.id)}
+                      onDelete={() => handleDeleteTemplate(template.id)}
+                      size="small"
+                    />
+                  ))}
+                </Box>
+                <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Template name"
+                    value={templateName}
+                    onChange={(e) => setTemplateName(e.target.value)}
+                    sx={{ flex: 1 }}
+                  />
+                  <Button size="small" startIcon={<SaveIcon />} onClick={handleSaveAsTemplate}>
+                    Save as Template
+                  </Button>
+                  <Button size="small" startIcon={<FileDownloadIcon />} onClick={handleExportTemplate}>
+                    Export
+                  </Button>
+                  <Button size="small" startIcon={<FileUploadIcon />} onClick={handleImportTemplate}>
+                    Import
+                  </Button>
+                </Box>
+              </Box>
+
+              {/* Mappings Table */}
+              <TableContainer sx={{ flex: 1, minHeight: 0 }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell width="16%">IFC Class</TableCell>
+                      <TableCell width="14%">Object Type</TableCell>
+                      <TableCell width="22%">Cost Item (WBS)</TableCell>
+                      <TableCell width="28%">Quantity Property</TableCell>
+                      <TableCell width="12%">Qty Type</TableCell>
+                      <TableCell width="8%" align="center">
+                        <IconButton size="small" onClick={handleAddMapping} color="primary">
+                          <AddIcon />
+                        </IconButton>
+                      </TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {mappings.map((mapping, index) => (
+                      <TableRow key={index}>
+                        <TableCell>
+                          <FormControl fullWidth size="small">
+                            <Select
+                              value={mapping.ifcClass}
+                              onChange={(e) => handleMappingChange(index, 'ifcClass', e.target.value)}
+                              displayEmpty
+                              MenuProps={{ style: { zIndex: 1400 } }}
+                            >
+                              <MenuItem value="">
+                                <em>Select IFC Class</em>
+                              </MenuItem>
+                              {availableIfcClasses.map(cls => (
+                                <MenuItem key={cls} value={cls}>
+                                  {cls} {ifcClassCounts[cls] ? `(${ifcClassCounts[cls]} elements)` : ''}
+                                </MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                        </TableCell>
+                        <TableCell>
+                          <FormControl fullWidth size="small">
+                            <Select
+                              value={mapping.objectType || ''}
+                              onChange={(e) => handleMappingChange(index, 'objectType', e.target.value)}
+                              displayEmpty
+                              disabled={!mapping.ifcClass || !objectTypesByClass[mapping.ifcClass]?.length}
+                              MenuProps={{ style: { zIndex: 1400 } }}
+                            >
+                              <MenuItem value="">
+                                <em>All Types</em>
+                              </MenuItem>
+                              {mapping.ifcClass && objectTypesByClass[mapping.ifcClass]?.map(type => (
+                                <MenuItem key={type} value={type}>
+                                  {type}
+                                </MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {mapping.ifcClass && objectTypesByClass[mapping.ifcClass]?.length > 0 && (
+                            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                              {objectTypesByClass[mapping.ifcClass].length} type{objectTypesByClass[mapping.ifcClass].length !== 1 ? 's' : ''} available
+                            </Typography>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <FormControl fullWidth size="small">
+                            <Select
+                              value={mapping.wbsCode}
+                              onChange={(e) => handleMappingChange(index, 'wbsCode', e.target.value)}
+                              displayEmpty
+                              MenuProps={{ style: { zIndex: 1400 } }}
+                            >
+                              <MenuItem value="">
+                                <em>Select WBS Code</em>
+                              </MenuItem>
+                              {costItems.map(item => (
+                                <MenuItem key={item.wbsCode} value={item.wbsCode}>
+                                  {item.wbsCode}: {item.description} ({item.unit})
+                                </MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {mapping.confidence && (
+                            <Typography variant="caption" color="text.secondary">
+                              AI Confidence: {(mapping.confidence * 100).toFixed(0)}%
+                            </Typography>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                            <FormControl fullWidth size="small">
+                              <Select
+                                value={mapping.quantityProperty || ''}
+                                onChange={(e) => handleMappingChange(index, 'quantityProperty', e.target.value)}
+                                displayEmpty
+                                disabled={!mapping.ifcClass || !mapping.wbsCode}
+                                MenuProps={{ style: { zIndex: 1400 } }}
+                              >
+                                <MenuItem value="">
+                                  <em>Select Property</em>
+                                </MenuItem>
+                                {mapping.ifcClass && availablePropertiesByClass[mapping.ifcClass]?.map(prop => (
+                                  <MenuItem key={prop} value={prop}>
+                                    {prop}
+                                  </MenuItem>
+                                ))}
+                              </Select>
+                            </FormControl>
+                            <IconButton 
+                              size="small" 
+                              onClick={() => handleAISuggestProperty(index)}
+                              disabled={!mapping.ifcClass || !mapping.wbsCode || isGeneratingAI || !sampleElementsByClass[mapping.ifcClass]}
+                              title="AI suggest property"
+                            >
+                              <AutoFixHighIcon />
+                            </IconButton>
+                          </Box>
+                          {mapping.ifcClass && availablePropertiesByClass[mapping.ifcClass] && (
+                            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                              {availablePropertiesByClass[mapping.ifcClass].length} properties available
+                            </Typography>
+                          )}
+                          {mapping.quantityProperty && (
+                            <Box sx={{ mt: 0.5 }}>
+                              <Typography variant="caption" color="success.main" display="block">
+                                ✓ Extract: {mapping.quantityProperty}
+                              </Typography>
+                              {mapping.quantityType && (
+                                <Chip
+                                  label={`Type: ${mapping.quantityType}`}
+                                  size="small"
+                                  variant="outlined"
+                                  sx={{ mt: 0.5, fontSize: '0.7rem' }}
+                                  color={mapping.quantityType === 'length' ? 'info' : 
+                                         mapping.quantityType === 'area' ? 'warning' :
+                                         mapping.quantityType === 'volume' ? 'error' :
+                                         mapping.quantityType === 'weight' ? 'secondary' : 'default'}
+                                />
+                              )}
+                              {mapping.propertyConfidence && (
+                                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                                  Confidence: {(mapping.propertyConfidence * 100).toFixed(0)}%
+                                </Typography>
+                              )}
+                            </Box>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <FormControl fullWidth size="small">
+                            <Select
+                              value={mapping.quantityType || ''}
+                              onChange={(e) => handleMappingChange(index, 'quantityType', e.target.value)}
+                              displayEmpty
+                              disabled={!mapping.quantityProperty}
+                              MenuProps={{ style: { zIndex: 1400 } }}
+                            >
+                              <MenuItem value="">
+                                <em>Auto</em>
+                              </MenuItem>
+                              <MenuItem value="length">📏 Length (m)</MenuItem>
+                              <MenuItem value="area">📐 Area (m²)</MenuItem>
+                              <MenuItem value="volume">📦 Volume (m³)</MenuItem>
+                              <MenuItem value="weight">⚖️ Weight (kg)</MenuItem>
+                              <MenuItem value="count">🔢 Count (pcs)</MenuItem>
+                            </Select>
+                          </FormControl>
+                          {mapping.quantityType && (
+                            <Typography variant="caption" color="info.main" display="block" sx={{ mt: 0.5 }}>
+                              ✓ Manual: {mapping.quantityType}
+                            </Typography>
+                          )}
+                        </TableCell>
+                        <TableCell align="center">
+                          <IconButton size="small" onClick={() => handleRemoveMapping(index)} color="error">
+                            <DeleteIcon />
+                          </IconButton>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {mappings.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={6} align="center">
+                          <Typography variant="body2" color="text.secondary">
+                            No mappings defined. Click + to add or use AI Suggest.
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </Box>
+
+            <Box sx={{ p: 2, display: 'flex', alignItems: 'center', borderTop: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
+              <Button
+                startIcon={isGeneratingAI ? <CircularProgress size={16} /> : <AutoFixHighIcon />}
+                onClick={handleAISuggest}
+                disabled={isGeneratingAI || isScanning}
+              >
+                {isGeneratingAI ? 'Generating...' : 'AI Suggest Mappings'}
+              </Button>
+              <Box sx={{ flex: 1 }} />
+              <Button onClick={onClose} sx={{ mr: 1 }}>Cancel</Button>
+              <Button variant="contained" onClick={handleSave}>
+                Save & Apply
+              </Button>
+            </Box>
+
+            <Box
+            onPointerDown={handleResizeStart}
+            sx={{
+              position: 'absolute',
+              bottom: 4,
+              right: 4,
+              width: 16,
+              height: 16,
+              cursor: 'nwse-resize',
+              borderRight: '2px solid',
+              borderBottom: '2px solid',
+              borderColor: 'divider',
+              opacity: 0.6,
+              '&:hover': { opacity: 1 },
+              zIndex: 10
+            }}
+          />
+          </>
+        )}
+      </Paper>
+    </Draggable>
   );
 }

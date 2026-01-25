@@ -16,6 +16,7 @@ import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import TextField from '@mui/material/TextField';
 import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import Tabs from '@mui/material/Tabs';
 import Tab from '@mui/material/Tab';
 import Alert from '@mui/material/Alert';
@@ -24,6 +25,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Collapse from '@mui/material/Collapse';
 import CloseIcon from '@mui/icons-material/Close';
 import MinimizeIcon from '@mui/icons-material/Minimize';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import OpenInFullIcon from '@mui/icons-material/OpenInFull';
 import CalculateIcon from '@mui/icons-material/Calculate';
 import SettingsIcon from '@mui/icons-material/Settings';
@@ -77,6 +79,62 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
   const [isConnected, setIsConnected] = useState(dbManager.isConnected());
   const [isMinimized, setIsMinimized] = useState(false);
   const nodeRef = useRef<HTMLDivElement>(null);
+
+  // Resizing state
+  const [size, setSize] = useState({ width: 800, height: 600 });
+  const resizingRef = useRef(false);
+  const resizeOriginRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
+
+  const onResizePointerMove = React.useCallback((event: PointerEvent) => {
+    if (!resizingRef.current || !resizeOriginRef.current) return;
+    const origin = resizeOriginRef.current;
+    
+    // Calculate new dimensions
+    const deltaX = event.clientX - origin.startX;
+    const deltaY = event.clientY - origin.startY;
+    
+    // Apply constraints (min 400x300 for QTO)
+    const nextWidth = Math.max(400, origin.width + deltaX);
+    const nextHeight = Math.max(300, origin.height + deltaY);
+    
+    setSize({ width: Math.round(nextWidth), height: Math.round(nextHeight) });
+  }, []);
+
+  const stopResize = React.useCallback(() => {
+    resizingRef.current = false;
+    resizeOriginRef.current = null;
+    window.removeEventListener('pointermove', onResizePointerMove);
+    window.removeEventListener('pointerup', stopResize);
+    document.body.style.cursor = '';
+  }, [onResizePointerMove]);
+
+  const handleResizeStart = React.useCallback((event: React.PointerEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    // Find the Paper element
+    const node = nodeRef.current;
+    if (!node) return;
+    
+    resizingRef.current = true;
+    resizeOriginRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      width: node.offsetWidth,
+      height: node.offsetHeight
+    };
+    
+    document.body.style.cursor = 'nwse-resize';
+    window.addEventListener('pointermove', onResizePointerMove);
+    window.addEventListener('pointerup', stopResize);
+  }, [onResizePointerMove, stopResize]);
+
+  // Cleanup resize listeners
+  useEffect(() => {
+    return () => {
+      stopResize();
+    };
+  }, [stopResize]);
 
   useEffect(() => {
     dbManager.initialize((data) => {
@@ -687,10 +745,24 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
                   unit = matchedItem.unit;
                 }
 
+                // FORCE FIX: If unit is 'pcs' (pieces), ALWAYS enforce quantity = 1 per element.
+                // This overrides any property mapping that might have been automatically selected.
+                // The user explicitly requested 'pcs', which in this context means "count of elements".
+                if (unit.toLowerCase() === 'pcs') {
+                   quantity = 1;
+                }
+
                 // Calculate costs
-                // Note: laborCost in CostItem is already the hourly rate × hours per unit
+                // Labor cost calculation:
+                // If laborHours is defined, laborCost is treated as Hourly Rate.
+                // If laborHours is missing/zero, laborCost is treated as Unit labor cost (fallback).
+                const hours = matchedItem?.laborHours || 0;
+                const unitLaborCost = (hours > 0) 
+                  ? (matchedItem?.laborCost || 0) * hours 
+                  : (matchedItem?.laborCost || 0);
+
                 const materialCost = matchedItem ? matchedItem.materialCost * quantity : 0;
-                const laborCost = matchedItem ? matchedItem.laborCost * quantity : 0;
+                const laborCost = matchedItem ? unitLaborCost * quantity : 0;
                 const totalCost = materialCost + laborCost;
 
                 extractedQuantities.push({
@@ -1000,12 +1072,15 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
           position: 'fixed',
           top: '80px',
           right: '20px',
-          width: '800px',
-          maxHeight: isMinimized ? 'auto' : 'calc(100vh - 100px)',
+          width: size.width,
+          height: isMinimized ? 'auto' : size.height,
+          maxHeight: isMinimized ? 'auto' : '90vh',
+          maxWidth: '90vw',
           zIndex: 1300,
           display: 'flex',
           flexDirection: 'column',
-          overflow: 'hidden'
+          overflow: 'hidden',
+          boxSizing: 'border-box'
         }}
         elevation={8}
       >
@@ -1025,6 +1100,26 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
         >
           <Typography variant="h6">Quantity Take-Off (QTO)</Typography>
           <Box>
+            <Tooltip 
+              title={
+                <Box sx={{ p: 1 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>How to use QTO Panel:</Typography>
+                  <Typography variant="body2" sx={{ display: 'block', mb: 0.5 }}>1. <b>Connect Database</b>: Load your cost/price list (Excel).</Typography>
+                  <Typography variant="body2" sx={{ display: 'block', mb: 0.5 }}>2. <b>Configure Mappings</b>: Link 3D objects (IFC Classes) to your Cost Items.</Typography>
+                  <Typography variant="body2" sx={{ display: 'block', mb: 0.5 }}>3. <b>Extract Quantities</b>: Run the calculation to analyze the model.</Typography>
+                  <Typography variant="body2" sx={{ display: 'block' }}>4. <b>Review</b>: See detailed costs and exporting options.</Typography>
+                </Box>
+              }
+              arrow
+              placement="left"
+            >
+                <IconButton 
+                  size="small" 
+                  sx={{ color: 'inherit', mr: 1 }}
+                >
+                  <HelpOutlineIcon />
+                </IconButton>
+            </Tooltip>
             <IconButton 
               onClick={() => setIsMinimized(!isMinimized)} 
               size="small" 
@@ -1378,6 +1473,25 @@ export const QtoPanel: React.FC<QtoPanelProps> = ({ isOpen = true, onClose, view
           )}
           </Box>
         </Box>
+        )}
+        {!isMinimized && (
+          <Box
+            onPointerDown={handleResizeStart}
+            sx={{
+              position: 'absolute',
+              bottom: 4,
+              right: 4,
+              width: 16,
+              height: 16,
+              cursor: 'nwse-resize',
+              borderRight: '2px solid',
+              borderBottom: '2px solid',
+              borderColor: 'divider',
+              opacity: 0.6,
+              '&:hover': { opacity: 1 },
+              zIndex: 10
+            }}
+          />
         )}
       </Paper>
     </Draggable>
