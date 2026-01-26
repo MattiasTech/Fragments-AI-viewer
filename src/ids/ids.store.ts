@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { collectElementsForIds, invalidateIdsElementsCache } from './ids.adapter';
+import { getUiSetting, setUiSetting } from '../utils/uiSettings';
 import type {
   BuildProgress,
   DetailRow,
@@ -42,7 +43,7 @@ const initialState: IdsStoreState = {
   filterDescription: null,
   error: null,
   lastRunAt: null,
-  validationMode: 'all', // Default to validating all elements
+  validationMode: getUiSetting('idsPanelScanScope') || 'all', // Load saved preference or default to all elements
 };
 
 let state = initialState;
@@ -175,6 +176,8 @@ const storeApi = {
     resetResults();
   },
   setValidationMode: (mode: 'all' | 'visible' | 'selected') => {
+    // Persist the preference
+    setUiSetting('idsPanelScanScope', mode);
     setState((prev) => ({
       ...prev,
       validationMode: mode,

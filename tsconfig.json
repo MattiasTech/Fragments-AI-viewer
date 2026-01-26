@@ -14,7 +14,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["vite/client"],
+    "types": ["vite/client", "wicg-file-system-access"],
     "baseUrl": "./",
     "paths": {
       "bsdd-ids-validator": ["src/ids/vendor/bsdd-ids-validator.ts"],
