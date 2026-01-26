@@ -665,7 +665,8 @@ const IdsPanel: React.FC<IdsPanelProps> = ({ isOpen, onOpen, onClose, viewerApi,
   useEffect(() => {
     if (!isOpen) return;
     return () => {
-      viewerApi?.clearColors?.();
+      // Only clear isolation, let App.tsx handle color clearing via resetViewerTools
+      // to avoid race conditions with highlighter recreation
       viewerApi?.clearIsolation?.();
     };
   }, [isOpen, viewerApi]);

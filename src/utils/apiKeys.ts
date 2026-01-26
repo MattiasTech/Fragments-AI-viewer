@@ -13,10 +13,6 @@ export interface ApiConfig {
   model?: string;
 }
 
-/**
- * Simple obfuscation to avoid plaintext storage
- * Note: This is NOT encryption, just basic obfuscation
- */
 const obfuscate = (text: string): string => {
   try {
     return btoa(text);
@@ -76,7 +72,10 @@ export const getAvailableModels = (provider: AIProvider): string[] => {
   switch (provider) {
     case 'gemini':
       return [
+        'gemini-3.0-pro',
+        'gemini-3.0-flash',
         'gemini-2.5-flash',
+        'gemini-2.0-flash',
         'gemini-2.0-flash-exp',
         'gemini-1.5-flash',
         'gemini-1.5-pro',
@@ -84,6 +83,8 @@ export const getAvailableModels = (provider: AIProvider): string[] => {
       ];
     case 'openai':
       return [
+        `gpt-5.2`,
+        `gpt-5.1`,
         `gpt-5o-mini`,
         'gpt-4o',
         'gpt-4o-mini',
@@ -101,7 +102,7 @@ export const getAvailableModels = (provider: AIProvider): string[] => {
 export const getDefaultModel = (provider: AIProvider): string => {
   switch (provider) {
     case 'gemini':
-      return 'gemini-2.5-flash';
+      return 'gemini-2.0-flash';
     case 'openai':
       return 'gpt-4o-mini';
     default:

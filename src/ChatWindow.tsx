@@ -70,16 +70,17 @@ interface Message {
 }
 
 interface ChatWindowProps {
-  getModelDataForAI: () => Promise<string>;
+  getModelDataForAI: (question?: string) => Promise<string>;
   isOpen: boolean;
   onOpen: () => void;
   onClose: () => void;
   expandSignal: number;
   onRequestSelection?: (command: SelectionCommand) => void;
   onOpenSettings?: () => void;
+  configVersion?: number;
 }
 
-const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOpen, onClose, expandSignal, onRequestSelection, onOpenSettings }) => {
+const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOpen, onClose, expandSignal, onRequestSelection, onOpenSettings, configVersion }) => {
   const [isMinimized, setIsMinimized] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     { role: 'system', text: 'Hello! I am your BIM assistant. Ask me anything about the loaded models.' }
@@ -149,12 +150,10 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOp
     }
   }, [isOpen]);
 
-  // Reload API config when window opens
+  // Reload API config when window opens OR when config version changes
   useEffect(() => {
-    if (isOpen) {
-      setApiConfig(loadApiConfig());
-    }
-  }, [isOpen]);
+    setApiConfig(loadApiConfig());
+  }, [isOpen, configVersion]);
 
   const handleSend = async () => {
     const question = input.trim();
@@ -178,7 +177,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ getModelDataForAI, isOpen, onOp
 
     try {
       // 1. Get contextual data from the main app
-      const modelContext = await getModelDataForAI();
+      const modelContext = await getModelDataForAI(question);
 
       // 2. Construct the prompt
       const fullPrompt = `You are a helpful BIM assistant who can describe models and help users explore geometry.
@@ -239,7 +238,7 @@ ${question}`;
       } else if (lowerMessage.includes('404')) {
         hint = `${providerName} returned 404. The requested model may not be available. Try a different model in Settings.`;
       } else if (lowerMessage.includes('429') || lowerMessage.includes('rate limit') || lowerMessage.includes('quota')) {
-        hint = `${providerName} rate limit exceeded. Please wait a moment before trying again or check your quota.`;
+        hint = `${providerName} rate limit exceeded (429). The model "${apiConfig.model}" might be overloaded or your free tier quota is exhausted. Try switching to a different model (e.g. gemini-2.0-flash) in Settings or wait a minute.`;
       } else if (message) {
         hint = `${providerName} error: ${message}`;
       }

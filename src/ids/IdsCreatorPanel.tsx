@@ -20,6 +20,7 @@ import FileOpenIcon from '@mui/icons-material/FileOpen';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import Autocomplete from '@mui/material/Autocomplete';
 import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
@@ -77,9 +78,16 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
   const selectedItemJson = useMemo(() => {
     if (!selectedItemData) return null;
     try {
+      // Create a shallow copy to avoid modifying the original
+      const safeData = { ...selectedItemData };
+      
+      // Remove potentially massive fields that cause RangeError
+      const keysToRemove = ['geometry', 'expressID', 'bits', 'handle', 'buffer'];
+      keysToRemove.forEach(key => delete safeData[key]);
+
       const seen = new WeakSet();
       return JSON.stringify(
-        selectedItemData,
+        safeData,
         (key, value) => {
           if (typeof value === 'bigint') {
             return value.toString();
@@ -90,13 +98,17 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
             }
             seen.add(value);
           }
+          // Truncate long strings
+          if (typeof value === 'string' && value.length > 1000) {
+            return value.substring(0, 1000) + '... (truncated)';
+          }
           return value;
         },
         2
       );
     } catch (error) {
       console.warn('Failed to stringify selected item data for IDS creator inspector', error);
-      return 'Unable to display selected element properties.';
+      return 'Unable to display selected element properties (Data too large).';
     }
   }, [selectedItemData]);
 
@@ -828,7 +840,7 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
           </Box>
         )}
         {/* Property picker dialog */}
-        <Dialog open={pickerOpen} onClose={() => setPickerOpen(false)} maxWidth="sm" fullWidth>
+        <Dialog open={pickerOpen} onClose={() => setPickerOpen(false)} maxWidth="sm" fullWidth sx={{ zIndex: 2000 }}>
           <DialogTitle>{editingRequirementIndexRef.current != null ? 'Edit Requirement' : 'Create Requirement'}</DialogTitle>
           <DialogContent>
             <Box sx={{ display: 'flex', gap: 2, mt: 1 }}>
@@ -839,6 +851,7 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
                   value={pickerPset ?? ''}
                   label="Property Set"
                   onChange={(e) => setPickerPset(String(e.target.value) || null)}
+                  MenuProps={{ style: { zIndex: 2100 } }}
                 >
                   {Object.keys(availablePsets).length ? (
                     Object.keys(availablePsets).map((ps) => <MenuItem key={ps} value={ps}>{ps}</MenuItem>)
@@ -854,6 +867,7 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
                   value={pickerProperty ?? ''}
                   label="Property"
                   onChange={(e) => setPickerProperty(String(e.target.value) || null)}
+                  MenuProps={{ style: { zIndex: 2100 } }}
                 >
                   {(pickerPset && availablePsets[pickerPset]) ? (
                     availablePsets[pickerPset].map((p) => <MenuItem key={p} value={p}>{p}</MenuItem>)
@@ -866,7 +880,13 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
             <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
               <FormControl fullWidth>
                 <InputLabel id="op-label">Operator</InputLabel>
-                <Select labelId="op-label" value={ruleOperator} label="Operator" onChange={(e) => setRuleOperator(String(e.target.value))}>
+                <Select 
+                  labelId="op-label" 
+                  value={ruleOperator} 
+                  label="Operator" 
+                  onChange={(e) => setRuleOperator(String(e.target.value))}
+                  MenuProps={{ style: { zIndex: 2100 } }}
+                >
                   <MenuItem value="exists">exists</MenuItem>
                   <MenuItem value="equals">equals</MenuItem>
                   <MenuItem value="not-equals">not equals</MenuItem>
@@ -874,7 +894,41 @@ const IdsCreatorPanel: React.FC<IdsCreatorPanelProps> = ({
                   <MenuItem value="matches">matches (regex)</MenuItem>
                 </Select>
               </FormControl>
-              <TextField fullWidth label="Value (optional)" value={ruleValue} onChange={(e) => setRuleValue(e.target.value)} />
+              <Autocomplete
+                 fullWidth
+                 freeSolo
+                 options={(() => {
+                    // Extract exact value from sample for suggestions
+                    const sample = (activeSpecification?.applicability?.[pickerSampleIndex ?? -1] as any)?.sample;
+                    if (!sample || !pickerPset || !pickerProperty) return [];
+                    try {
+                      const isDefinedBy = sample.IsDefinedBy || sample.isDefinedBy;
+                      if (Array.isArray(isDefinedBy)) {
+                        for (const ps of isDefinedBy) {
+                          const psName = ps.Name?.value || ps.name?.value || ps.Name || ps.name;
+                          if (psName === pickerPset) {
+                             const props = ps.HasProperties || ps.hasProperties;
+                             if (Array.isArray(props)) {
+                               for (const p of props) {
+                                 const pName = p.Name?.value || p.name?.value || p.Name || p.name;
+                                 if (pName === pickerProperty) {
+                                    let val = p.NominalValue?.value || p.nominalValue?.value || p.NominalValue || p.nominalValue || p.value || p.Value;
+                                    if (typeof val === 'boolean') val = val ? 'true' : 'false';
+                                    if (val != null) return [String(val)];
+                                 }
+                               }
+                             }
+                          }
+                        }
+                      }
+                    } catch { return []; }
+                    return [];
+                 })()}
+                 value={ruleValue}
+                 onInputChange={(_, v) => setRuleValue(v)}
+                 renderInput={(params) => <TextField {...params} label="Value (optional or select)" />}
+                 componentsProps={{ popper: { style: { zIndex: 2100 } } }}
+              />
             </Box>
           </DialogContent>
           <DialogActions>

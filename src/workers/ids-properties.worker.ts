@@ -45,7 +45,7 @@ function extractPropertySets(data: Record<string, unknown>): Record<string, Reco
   const psets: Record<string, Record<string, unknown>> = {};
   
   // Look for property sets in common locations
-  const psetKeys = ['PropertySets', 'propertySets', 'psets', 'Psets'];
+  const psetKeys = ['PropertySets', 'propertySets', 'psets', 'Psets', 'Quantities', 'quantities'];
   
   for (const key of psetKeys) {
     const value = data[key];
@@ -94,7 +94,7 @@ function extractPropertySets(data: Record<string, unknown>): Record<string, Reco
   
   // Also check for direct property sets at root level
   Object.entries(data).forEach(([key, value]) => {
-    if (key.startsWith('Pset_') || key.startsWith('pset_')) {
+    if (key.startsWith('Pset_') || key.startsWith('pset_') || key.startsWith('Qto_') || key.startsWith('qto_')) {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         psets[key] = value as Record<string, unknown>;
       }

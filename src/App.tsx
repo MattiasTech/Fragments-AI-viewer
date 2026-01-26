@@ -27,6 +27,8 @@ import Link from '@mui/material/Link';
 import FormControl from '@mui/material/FormControl';
 import FormLabel from '@mui/material/FormLabel';
 import RadioGroup from '@mui/material/RadioGroup';
+import Select from '@mui/material/Select';
+import InputLabel from '@mui/material/InputLabel';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import Radio from '@mui/material/Radio';
 import Alert from '@mui/material/Alert';
@@ -48,6 +50,8 @@ import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import GridOnIcon from '@mui/icons-material/GridOn';
+import GridOffIcon from '@mui/icons-material/GridOff';
 import ContentCutIcon from '@mui/icons-material/ContentCut';
 import StraightenIcon from '@mui/icons-material/Straighten';
 import CropIcon from '@mui/icons-material/Crop';
@@ -65,6 +69,7 @@ import type { SelectionCommand } from './ChatWindow';
 import { saveApiConfig, loadApiConfig, clearApiConfig, getAvailableModels, getDefaultModel, type AIProvider, type ApiConfig } from './utils/apiKeys';
 import { testGeminiConnection } from './ai/gemini';
 import { testOpenAIConnection } from './ai/openai';
+import { AIQueryEngine } from './ai/AIQueryEngine';
 const ChatWindow = React.lazy(() => import('./ChatWindow'));
 const IdsPanel = React.lazy(() => import('./ids/IdsPanel'));
 const IdsCreatorPanel = React.lazy(() => import('./ids/IdsCreatorPanel'));
@@ -1228,6 +1233,7 @@ const App: React.FC = () => {
   const aiSelectionSeqRef = useRef(0);
   const highlighterRef = useRef<any>(null);
   const idsOriginalColorsRef = useRef<Map<string, { material: any; color: THREE.Color | null }> | null>(null);
+  const idsCreatedStylesRef = useRef<Set<string>>(new Set());
   const ghostOriginalMaterialsRef = useRef<Map<any, { color: number | undefined; transparent: boolean; opacity: number }> | null>(null);
   
   // Rectangle selection refs
@@ -1269,6 +1275,9 @@ const App: React.FC = () => {
   const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
+  // AI Config Version - triggers ChatWindow reload
+  const [aiConfigVersion, setAiConfigVersion] = useState(0);
+
   // Settings dialog state
   const [settingsProvider, setSettingsProvider] = useState<AIProvider>('disabled');
   const [settingsApiKey, setSettingsApiKey] = useState('');
@@ -1307,6 +1316,13 @@ const App: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [isViewToolbarOpen, setIsViewToolbarOpen] = useState(false);
+  
+  // Grid controls
+  const [gridVisible, setGridVisible] = useState(true);
+  const [gridOffset, setGridOffset] = useState(0);
+  const [levels, setLevels] = useState<{ name: string; elevation: number; originalElevation: number; globalId: string }[]>([]);
+  const [selectedLevelId, setSelectedLevelId] = useState<string>('');
+  const gridRef = useRef<any>(null);
   const [clippingPlanes, setClippingPlanes] = useState({ x: false, y: false, z: false });
   const [clippingPositions, setClippingPositions] = useState({ x: 0, y: 0, z: 0 });
   const [isClippingBoxActive, setIsClippingBoxActive] = useState(false);
@@ -1536,6 +1552,89 @@ const App: React.FC = () => {
     return lines.join('\r\n');
   }, []);
 
+  const updateSelectedProperties = useCallback(
+    (data: Record<string, any> | null) => {
+      const normalized = data ?? null;
+      setProperties(normalized);
+      const { rows } = buildPropertyData(normalized);
+      setPropertyRows(rows);
+      setSelectedPropertyTab(favoritePropertyPaths.length ? 'favorites' : 'all');
+      if (rows.length) {
+        setLastItemsDataRows(rows.map((row) => ({ path: row.label, value: row.value })));
+        const header = 'Path\tValue';
+        const tsvRows = rows.map((row) => `${row.label}\t${row.value ?? ''}`);
+        setLastItemsDataTSV([header, ...tsvRows].join('\r\n'));
+      } else {
+        setLastItemsDataRows([]);
+        setLastItemsDataTSV(null);
+      }
+    },
+    [favoritePropertyPaths.length]
+  );
+
+
+
+  // Centralized helper to reset viewer tools to a clean state
+  const resetViewerTools = useCallback(async () => {
+    // 1. Enable Highlighter
+    if (highlighterRef.current) {
+      const highlighter = highlighterRef.current as any;
+      highlighter.enabled = true;
+      
+      // Clear any lingering selection highlights
+      try {
+        if (typeof highlighter.clear === 'function') {
+          await highlighter.clear();
+        }
+        
+        // CRITICAL: Ensure 'select' style exists after clear/reset
+        // The error "Selection select does not exist" implies it might be missing
+        if (typeof highlighter.create === 'function') {
+          // Check if 'select' exists in list or selection map
+          // Wait a tick to ensure clear() has fully propagated
+          await new Promise(resolve => setTimeout(resolve, 0));
+          
+          const hasSelect = highlighter.list?.has('select') || highlighter.selection?.select;
+          if (!hasSelect) {
+            console.debug('Re-creating missing "select" style in resetViewerTools');
+            highlighter.create('select');
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to clear/reset highlighter:', e);
+      }
+    }
+    
+    // 2. Reset Isolation (Show all)
+    if (hiderRef.current) {
+      try {
+        await hiderRef.current.set(true);
+      } catch (e) {
+        console.warn('Failed to reset isolation:', e);
+      }
+    }
+    
+    // 3. Reset Ghost Mode / Filter Modes
+    isGhostModeRef.current = false;
+    setIsGhostMode(false);
+    isFilterGhostModeRef.current = false;
+    filterGhostSelectionRef.current = null;
+    
+    // 4. Reset Visuals
+    if (fragmentsRef.current) {
+      try {
+        fragmentsRef.current.resetHighlight();
+        fragmentsRef.current.core.update(true);
+      } catch (e) {
+        console.warn('Failed to reset fragments highlight:', e);
+      }
+    }
+    
+    // 5. Clear selection state
+    setSelectedItems([]);
+    updateSelectedProperties(null);
+  }, [updateSelectedProperties]);
+
   const handleOpenExportDialog = useCallback(() => {
     setExportError(null);
     setExportScope(propertyRows.length ? 'selected' : 'model');
@@ -1591,7 +1690,8 @@ const App: React.FC = () => {
     if (isExporting) return;
     setExportDialogOpen(false);
     setExportError(null);
-  }, [isExporting]);
+    resetViewerTools();
+  }, [isExporting, resetViewerTools]);
 
   const handleConfirmExport = useCallback(async () => {
     if (isExporting) return;
@@ -1635,25 +1735,7 @@ const App: React.FC = () => {
     }
   }, [buildCsvContent, exportModelId, exportScope, gatherModelPropertyRows, isExporting, propertyRows]);
 
-  const updateSelectedProperties = useCallback(
-    (data: Record<string, any> | null) => {
-      const normalized = data ?? null;
-      setProperties(normalized);
-      const { rows } = buildPropertyData(normalized);
-      setPropertyRows(rows);
-      setSelectedPropertyTab(favoritePropertyPaths.length ? 'favorites' : 'all');
-      if (rows.length) {
-        setLastItemsDataRows(rows.map((row) => ({ path: row.label, value: row.value })));
-        const header = 'Path\tValue';
-        const tsvRows = rows.map((row) => `${row.label}\t${row.value ?? ''}`);
-        setLastItemsDataTSV([header, ...tsvRows].join('\r\n'));
-      } else {
-        setLastItemsDataRows([]);
-        setLastItemsDataTSV(null);
-      }
-    },
-    [favoritePropertyPaths.length]
-  );
+
 
   const toggleIdsCreatorPanel = useCallback(() => {
     setIsIdsCreatorOpen((prev) => !prev);
@@ -1670,17 +1752,18 @@ const App: React.FC = () => {
 
   const closeChatWindow = useCallback(() => {
     setIsChatOpen(false);
-  }, []);
+    resetViewerTools();
+  }, [resetViewerTools]);
 
   const toggleChatWindow = useCallback(() => {
-    setIsChatOpen((prev) => {
-      const next = !prev;
-      if (next) {
-        setChatExpandSignal((signal) => signal + 1);
-      }
-      return next;
-    });
-  }, []);
+    if (isChatOpen) {
+      setIsChatOpen(false);
+      resetViewerTools();
+    } else {
+      setIsChatOpen(true);
+      setChatExpandSignal((signal) => signal + 1);
+    }
+  }, [isChatOpen, resetViewerTools]);
 
   const handleAboutOpen = useCallback(() => {
     setIsAboutOpen(true);
@@ -1688,7 +1771,8 @@ const App: React.FC = () => {
 
   const handleAboutClose = useCallback(() => {
     setIsAboutOpen(false);
-  }, []);
+    resetViewerTools();
+  }, [resetViewerTools]);
 
   const handleSettingsOpen = useCallback(() => {
     // Load current config
@@ -1710,7 +1794,8 @@ const App: React.FC = () => {
     setIsSettingsOpen(false);
     setShowSettingsApiKey(false);
     setConnectionTestResult(null);
-  }, []);
+    resetViewerTools();
+  }, [resetViewerTools]);
 
   const handleSettingsSave = useCallback(() => {
     if (settingsProvider === 'disabled') {
@@ -1723,6 +1808,7 @@ const App: React.FC = () => {
       };
       saveApiConfig(config);
     }
+    setAiConfigVersion(v => v + 1);
     handleSettingsClose();
   }, [settingsProvider, settingsApiKey, settingsModel, handleSettingsClose]);
 
@@ -2145,20 +2231,42 @@ const App: React.FC = () => {
       }
       
       const visibleGlobalIds: string[] = [];
+      let totalElements = 0;
+      let visibleElements = 0;
       
       for (const [modelId, model] of fragments.list) {
         try {
+          // Get all local IDs first to check total count
+          let allLocalIds: number[] = [];
+          try {
+            const fetched = await model.getLocalIds();
+            allLocalIds = Array.isArray(fetched) 
+              ? fetched 
+              : (fetched && typeof (fetched as any)[Symbol.iterator] === 'function')
+                ? Array.from(fetched as Iterable<number>)
+                : [];
+            totalElements += allLocalIds.length;
+          } catch (error) {
+            console.error(`👁️ Failed to get local IDs for model ${modelId}:`, error);
+            continue;
+          }
           
           // Get local IDs of visible elements
           const visibleLocalIds = await model.getItemsByVisibility(true);
+          visibleElements += visibleLocalIds.length;
           
-          if (visibleLocalIds.length === 0) continue;
+          // If getItemsByVisibility returns empty but we have elements, it might mean:
+          // 1. The visibility API isn't tracking properly
+          // 2. Everything is hidden (which is intentional)
+          // For now, if we get 0 visible but have elements, treat all as visible
+          const localIdsToProcess = visibleLocalIds.length > 0 ? visibleLocalIds : allLocalIds;
+          
+          if (localIdsToProcess.length === 0) continue;
           
           // Convert local IDs to GlobalIds
-          // We need to fetch the GlobalId attribute for each visible element
-          const batchSize = 100; // Process in batches to avoid overwhelming the system
-          for (let i = 0; i < visibleLocalIds.length; i += batchSize) {
-            const batch = visibleLocalIds.slice(i, Math.min(i + batchSize, visibleLocalIds.length));
+          const batchSize = 100;
+          for (let i = 0; i < localIdsToProcess.length; i += batchSize) {
+            const batch = localIdsToProcess.slice(i, Math.min(i + batchSize, localIdsToProcess.length));
             
             try {
               const itemsData = await model.getItemsData(batch, { 
@@ -2180,6 +2288,8 @@ const App: React.FC = () => {
           console.error(`👁️ Error getting visible elements from model ${modelId}:`, error);
         }
       }
+      
+      console.log(`👁️ getVisibleGlobalIds: Found ${visibleGlobalIds.length} visible elements (${visibleElements} reported visible out of ${totalElements} total)`);
       
       return visibleGlobalIds;
     },
@@ -2599,7 +2709,57 @@ const App: React.FC = () => {
         try {
           const ids = Array.from(localIds);
           
-          // Try the deprecated add method first (most reliable)
+          // Try the new styles.set() API (replaces deprecated add method)
+          // We prioritize this to avoid "add() is deprecated" warnings and to better manage styles
+          if (highlighter.styles && typeof highlighter.styles.set === 'function') {
+            try {
+              // Skip if no IDs to highlight
+              if (!ids || ids.length === 0) {
+                console.debug(`Skipping highlight for model ${modelId} - no IDs`);
+                continue;
+              }
+              
+              // Create a style name for this color
+              const styleName = `ids-color-${colorHex.toString(16).padStart(6, '0')}`;
+              
+              // Track this style so we can remove it later without wiping 'select'
+              idsCreatedStylesRef.current.add(styleName);
+              
+              // Set the style for these IDs
+              highlighter.styles.set(styleName, {
+                color: color,
+                fillOpacity: 1
+              });
+              
+              // Create the selection first if it doesn't exist
+              if (typeof highlighter.create === 'function') {
+                try {
+                  // Create a selection for this style if it doesn't exist
+                  if (!highlighter.list || !highlighter.list.has(styleName)) {
+                    highlighter.create(styleName);
+                  }
+                } catch (createError) {
+                  console.debug('highlighter.create failed:', createError);
+                }
+              }
+              
+              // Apply the style to the model and IDs
+              if (typeof highlighter.select === 'function') {
+                try {
+                  highlighter.select(model, ids, styleName);
+                } catch (selectError) {
+                  console.debug('highlighter.select failed:', selectError);
+                  throw selectError; // Re-throw to try next method
+                }
+              }
+              
+              continue;
+            } catch (e) {
+              console.debug('styles.set failed:', e);
+            }
+          }
+
+          // Try the deprecated add method as fallback
           if (typeof highlighter.add === 'function') {
             try {
               highlighter.add(model, ids, colorHex);
@@ -2636,52 +2796,6 @@ const App: React.FC = () => {
               continue;
             } catch (e) {
               console.debug('highlightByID failed:', e);
-            }
-          }
-          
-          // Try the new styles.set() API (replaces deprecated add method)
-          if (highlighter.styles && typeof highlighter.styles.set === 'function') {
-            try {
-              // Skip if no IDs to highlight
-              if (!ids || ids.length === 0) {
-                console.debug(`Skipping highlight for model ${modelId} - no IDs`);
-                continue;
-              }
-              
-              // Create a style name for this color
-              const styleName = `ids-color-${colorHex.toString(16).padStart(6, '0')}`;
-              
-              // Set the style for these IDs
-              highlighter.styles.set(styleName, {
-                color: color,
-                fillOpacity: 1
-              });
-              
-              // Create the selection first if it doesn't exist
-              if (typeof highlighter.create === 'function') {
-                try {
-                  // Create a selection for this style if it doesn't exist
-                  if (!highlighter.list || !highlighter.list.has(styleName)) {
-                    highlighter.create(styleName);
-                  }
-                } catch (createError) {
-                  console.debug('highlighter.create failed:', createError);
-                }
-              }
-              
-              // Apply the style to the model and IDs
-              if (typeof highlighter.select === 'function') {
-                try {
-                  highlighter.select(model, ids, styleName);
-                } catch (selectError) {
-                  console.debug('highlighter.select failed:', selectError);
-                  throw selectError; // Re-throw to try next method
-                }
-              }
-              
-              continue;
-            } catch (e) {
-              console.debug('styles.set failed:', e);
             }
           }
           
@@ -2745,14 +2859,29 @@ const App: React.FC = () => {
             }
           }
           
-          // Try the new clear API first
+          // Try the new clear API first (clears current selection)
           if (typeof highlighter.clear === 'function') {
             await Promise.resolve(highlighter.clear());
           }
           
-          // Also clear any styles we created
-          if (highlighter.styles && typeof highlighter.styles.clear === 'function') {
+          // Clear specifically the styles we created for IDS
+          // We avoid using styles.clear() because it wipes the default 'select' style
+          if (highlighter.styles && typeof highlighter.styles.delete === 'function') {
+            // Delete tracked styles
+            idsCreatedStylesRef.current.forEach(styleName => {
+              try {
+                highlighter.styles.delete(styleName);
+              } catch (e) {
+                // ignore
+              }
+            });
+            idsCreatedStylesRef.current.clear();
+          } else if (highlighter.styles && typeof highlighter.styles.clear === 'function') {
+            // Fallback to clear all if delete is not available, but try to restore select
             highlighter.styles.clear();
+            if (typeof highlighter.create === 'function') {
+              try { highlighter.create('select'); } catch (e) {}
+            }
           }
         }
       } catch (error) {
@@ -2942,6 +3071,62 @@ const App: React.FC = () => {
       
       return results;
     },
+    getLoadedCategories: async () => {
+      const fragments = fragmentsRef.current;
+      if (!fragments) {
+        return [];
+      }
+      
+      const types = new Set<string>();
+      
+      // Since we don't have easy access to the TypeID->String map here without importing web-ifc explicitly,
+      // and we want this to be robust:
+      // We will do a full scan of ALL common types efficiently.
+      
+      const found: string[] = [];
+      const KNOWN_IFC_TYPES_ALL = [
+        'IfcWall', 'IfcWallStandardCase', 'IfcSlab', 'IfcRoof', 'IfcWindow', 'IfcDoor', 'IfcColumn', 'IfcBeam',
+        'IfcStair', 'IfcStairFlight', 'IfcRailing', 'IfcCurtainWall', 'IfcPlate', 'IfcMember',
+        'IfcBuildingElementProxy', 'IfcFurnishingElement', 'IfcFlowTerminal', 'IfcSpace',
+        'IfcDuctSegment', 'IfcPipeSegment', 'IfcFlowFitting', 'IfcFlowController', 'IfcDiscreteAccessory',
+        'IfcSite', 'IfcBuilding', 'IfcBuildingStorey', 'IfcGroup', 'IfcZone', 'IfcSystem', 'IfcDistributionSystem',
+        'IfcProject', 'IfcOpeningElement', 'IfcAnnotation', 'IfcGrid', 'IfcCovering', 'IfcFooting', 'IfcPile',
+        'IfcRamp', 'IfcRampFlight', 'IfcFlowSegment', 'IfcFlowStorageDevice', 'IfcFlowMovingDevice',
+        'IfcFlowTreatmentDevice', 'IfcEnergyConversionDevice', 'IfcCivilElement', 'IfcGeographicElement',
+        'IfcVirtualElement'
+      ];
+      
+      // We will perform a massive check. It is fast because it's just index lookups.
+      const promises = [];
+      // Group by regex to minimize calls? Actually `getItemsOfCategories` takes array of regex.
+      // We can pass ONE array of regexes for ALL types to `getItemsOfCategories`.
+      // It returns matching items. But we want to know WHICH regex matched.
+      // `getItemsOfCategories` returns { [id: string]: number[] }? No.
+      
+      // Let's simplify: Check each type individually, but in parallel promises.
+      // The index lookup is instant.
+      
+      for (const type of KNOWN_IFC_TYPES_ALL) {
+        promises.push((async () => {
+             const regex = new RegExp(`^${type}$`, 'i');
+             for (const [_, model] of fragments.list) {
+                 try {
+                     const results = await model.getItemsOfCategories([regex]);
+                     // Check if any result
+                     if (results && Object.keys(results).length > 0) {
+                         // Double check it's not empty arrays
+                         const hasItems = Object.values(results).some((arr: any) => arr && arr.length > 0);
+                         if (hasItems) return type;
+                     }
+                 } catch (e) { }
+             }
+             return null;
+        })());
+      }
+      
+      const results = await Promise.all(promises);
+      return results.filter((t): t is string => t !== null).sort();
+    },
     getItemsByCategory: async (categories: RegExp[]) => {
       const fragments = fragmentsRef.current;
       if (!fragments) {
@@ -3040,6 +3225,139 @@ const App: React.FC = () => {
 
   viewerApiRef.current = viewerApi;
 
+  // Extract levels from the model
+  const extractLevels = useCallback(async () => {
+    if (!modelLoaded) return;
+    
+    try {
+      // Check if required API methods exist
+      if (!viewerApi.getItemsByCategory || !viewerApi.getItemsDataByModel) {
+        console.warn('viewerApi missing required methods for level extraction');
+        return;
+      }
+
+      // Extracting building levels (logs suppressed)
+      // Find all IfcBuildingStorey elements
+      const storeys = await viewerApi.getItemsByCategory([/IfcBuildingStorey/i]);
+      
+      const levelData: { name: string; elevation: number; globalId: string }[] = [];
+      
+      for (const [modelId, localIds] of Object.entries(storeys)) {
+        if (localIds.length === 0) continue;
+        
+        // processing storeys for model
+        const props = await viewerApi.getItemsDataByModel(modelId, localIds, FRAGMENTS_ITEM_DATA_OPTIONS);
+        
+        for (let i = 0; i < props.length; i++) {
+          const prop = props[i];
+          
+          // Try multiple approaches to get the name
+          let name = findFirstValueByKeywords(prop, ['name', 'label', 'longname']);
+          if (!name) name = readName(prop);
+          if (!name) name = `Level ${i + 1}`;
+          
+          // Try to find elevation - check multiple possible locations
+          let elevationVal = findFirstValueByKeywords(prop, ['elevation', 'z']);
+          
+          // Also check if there's an Elevation property in property sets
+          if (!elevationVal && prop.Elevation) {
+            elevationVal = extractNominalValue(prop.Elevation);
+          }
+          
+          // Get GlobalId
+          const globalId = findFirstValueByKeywords(prop, ['globalid', 'guid', '_guid']);
+          
+          // storey: name/elevation/globalId (logging suppressed)
+          
+          if (globalId) {
+            // Use elevation if available, otherwise use 0
+            const elevation = elevationVal ? parseFloat(elevationVal) : 0;
+            
+            levelData.push({
+              name,
+              elevation: isNaN(elevation) ? 0 : elevation,
+              globalId
+            });
+          }
+        }
+      }
+      
+      // extracted levels (logging suppressed)
+      
+      // Sort by elevation
+      levelData.sort((a, b) => a.elevation - b.elevation);
+      
+      // Store original elevations and normalize for display
+      const levelsWithOriginal: { name: string; elevation: number; originalElevation: number; globalId: string }[] = [];
+      
+      if (levelData.length > 0) {
+        const lowestElevation = levelData[0].elevation;
+        // lowest level elevation computed (normalized for display)
+        
+        // Create new array with both original and normalized elevations
+        levelData.forEach(level => {
+          levelsWithOriginal.push({
+            name: level.name,
+            elevation: level.elevation - lowestElevation, // Normalized for display
+            originalElevation: level.elevation, // Original for grid positioning
+            globalId: level.globalId
+          });
+        });
+      }
+      
+      setLevels(levelsWithOriginal);
+      
+      // Select the lowest level by default and position grid at IFC level elevation + coordHeight (ThatOpen approach)
+      if (levelsWithOriginal.length > 0) {
+        setSelectedLevelId(levelsWithOriginal[0].globalId);
+        
+        // Position grid using IFC level elevation with coordinate height adjustment
+        if (gridRef.current && fragmentsRef.current) {
+          try {
+            // Get coordinate height from the first model (following ThatOpen's approach)
+            let coordHeight = 0;
+            for (const [modelId, model] of fragmentsRef.current.list) {
+              // Try to get coordinate height from model
+              if (typeof (model as any).getCoordinates === 'function') {
+                try {
+                  const coords = await (model as any).getCoordinates();
+                  if (Array.isArray(coords) && coords.length >= 2) {
+                    coordHeight = coords[1]; // [coordX, coordHeight, coordZ]
+                    
+                    break;
+                  }
+                } catch (e) {
+                  // ignore coordinate retrieval errors
+                }
+              }
+            }
+            
+            // Position grid at the lowest IFC level elevation + coordHeight
+            const ifcElevation = levelsWithOriginal[0].originalElevation;
+            const gridElevation = ifcElevation + coordHeight;
+            
+            const gridMesh = (gridRef.current as any).three;
+            if (gridMesh && gridMesh.position) {
+              gridMesh.position.y = gridElevation;
+              
+            }
+          } catch (error) {
+            // failed to position grid at IFC level
+          }
+        }
+      }
+      
+    } catch (e) {
+      console.error('Failed to extract levels', e);
+    }
+  }, [modelLoaded, viewerApi]);
+
+  useEffect(() => {
+    if (modelLoaded) {
+      extractLevels();
+    }
+  }, [modelLoaded, extractLevels]);
+
   const openIdsPanel = useCallback(() => {
     setIsIdsOpen(true);
     setIdsExpandSignal((value) => value + 1);
@@ -3047,23 +3365,18 @@ const App: React.FC = () => {
 
   const closeIdsPanel = useCallback(() => {
     setIsIdsOpen(false);
-    const api = viewerApiRef.current;
-    if (!api) return;
-    Promise.resolve(api.clearColors()).catch(() => {});
-    if (api.clearIsolation) {
-      Promise.resolve(api.clearIsolation()).catch(() => {});
-    }
-  }, []);
+    resetViewerTools();
+  }, [resetViewerTools]);
 
   const toggleIdsPanel = useCallback(() => {
-    setIsIdsOpen((prev) => {
-      const next = !prev;
-      if (next) {
-        setIdsExpandSignal((value) => value + 1);
-      }
-      return next;
-    });
-  }, []);
+    if (isIdsOpen) {
+      setIsIdsOpen(false);
+      resetViewerTools();
+    } else {
+      setIsIdsOpen(true);
+      setIdsExpandSignal((value) => value + 1);
+    }
+  }, [isIdsOpen, resetViewerTools]);
 
   const handleValidateFromCreator = useCallback(async (idsXml: string) => {
     try {
@@ -3237,7 +3550,12 @@ const App: React.FC = () => {
       if (disposed) return;
 
       try {
-        components.get(OBC.Grids).create(world);
+        const grids = components.get(OBC.Grids);
+        const grid = grids.create(world);
+        gridRef.current = grid;
+        if (grid) {
+          grid.visible = true;
+        }
       } catch (error) {
         console.warn('Failed to create grid component', error);
       }
@@ -3254,7 +3572,8 @@ const App: React.FC = () => {
 
       const highlighter = components.get(OBCF.Highlighter);
       highlighter.setup({ world });
-      highlighter.zoomToSelection = true;
+      // Disable auto-zoom to prevent camera movement conflicts and flickering
+      highlighter.zoomToSelection = false;
       
       // Ensure default "select" style exists and wait for selection system to be ready
       try {
@@ -3517,6 +3836,7 @@ const App: React.FC = () => {
 
       if (ext === 'ifc') {
         if (!ifcImporter) throw new Error('IFC importer is not ready.');
+        console.log('🔧 Starting IFC conversion:', file.name);
         setIfcProgress(0);
         usedIfcProgress = true;
         ifcCancelledRef.current = false;
@@ -3524,6 +3844,7 @@ const App: React.FC = () => {
         const ctrl = new AbortController();
         ifcAbortRef.current = ctrl;
         const ifcBytes = new Uint8Array(await file.arrayBuffer());
+        console.log('🔧 IFC file size:', ifcBytes.byteLength, 'bytes');
         const processed = await ifcImporter.process({
           bytes: ifcBytes,
           progressCallback: (p: number, msg: unknown) => {
@@ -3537,6 +3858,7 @@ const App: React.FC = () => {
           // Pass abort signal if importer supports it; harmless if ignored
           signal: ctrl.signal,
         } as any);
+        console.log('🔧 IFC conversion complete');
         // If the user cancelled during processing, stop here
         if (ifcCancelledRef.current) {
           throw { __cancelled: true } as any;
@@ -3561,6 +3883,7 @@ const App: React.FC = () => {
           fragArrayBuffer = copy.buffer;
         }
         model = await fragments.core.load(fragArrayBuffer, { modelId });
+        
       } else if (ext === 'frag') {
         const fragBytes = await file.arrayBuffer();
         model = await fragments.core.load(fragBytes, { modelId });
@@ -3576,19 +3899,49 @@ const App: React.FC = () => {
         console.warn('World camera not ready; skipping model camera binding.');
       }
       world.scene.three.add(model.object);
+      
+      // Model coordinate system logging removed for cleaner output
 
       // Ensure fragments finish building GPU buffers before computing bounds
-    await fragments.core.update(true);
+      await fragments.core.update(true);
+      
+      // Force highlighter update immediately after model load
+      const highlighter = highlighterRef.current;
+      if (highlighter) {
+        try {
+          // 1. Ensure enabled
+          (highlighter as any).enabled = true;
+          
+          // 2. Force update of internal raycaster/meshes if possible
+          if (typeof (highlighter as any).update === 'function') {
+            (highlighter as any).update();
+          }
+          
+          // 3. Ensure 'select' style is ready for the new model
+          if (typeof (highlighter as any).create === 'function') {
+            if (!(highlighter as any).list?.has('select')) {
+              (highlighter as any).create('select');
+            }
+          }
+        } catch (e) {
+          console.warn('Failed to update highlighter after load:', e);
+        }
+      }
+
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 
       // --- Center & fit ---
       const box = new THREE.Box3().setFromObject(model.object);
       const center = new THREE.Vector3();
       box.getCenter(center);
+      
+      // Model bounding box logging removed for cleaner output
 
       // If the model is very far from origin (georeferenced), recenter it
       if (Math.abs(center.x) > 1e6 || Math.abs(center.y) > 1e6 || Math.abs(center.z) > 1e6) {
+        console.log('⚠️  Model is georeferenced (far from origin), recentering...');
         model.object.position.sub(center);
+        console.log('  - New position:', model.object.position.x.toFixed(3), model.object.position.y.toFixed(3), model.object.position.z.toFixed(3));
       }
 
       // Fit camera to the model bounds (smooth = true)
@@ -3967,13 +4320,31 @@ const App: React.FC = () => {
     };
   }, [stopExplorerResize]);
 
-  const getModelDataForAI = useCallback(async () => {
+  // Synchronize viewerApi with AIQueryEngine
+  useEffect(() => {
+    if (viewerApi) {
+      AIQueryEngine.getInstance().setViewerApi(viewerApi);
+      // Start indexing in background
+      AIQueryEngine.getInstance().indexModel();
+    }
+  }, [viewerApi]);
+
+  const getModelDataForAI = useCallback(async (question?: string) => {
     const fr = fragmentsRef.current;
     const lines: string[] = [];
 
     if (!fr || fr.list.size === 0 || models.length === 0) {
       lines.push('No models are currently loaded in the viewer.');
     } else {
+      // AI Query Engine Context
+      try {
+        const engineContext = await AIQueryEngine.getInstance().generateContext(question || '');
+        lines.push(engineContext);
+        lines.push('---');
+      } catch (e) {
+        console.warn('AI Engine not ready', e);
+      }
+
       lines.push(`Loaded models (${models.length}): ${models.map((m) => `${m.label} [${m.id}]`).join(', ')}`);
       lines.push(`Fragments models in memory: ${fr.list.size}`);
       try {
@@ -4057,57 +4428,6 @@ const App: React.FC = () => {
         } else {
           lines.push('  Properties for this selection are not available yet.');
         }
-      }
-    } else {
-      lines.push('No active selection — exporting properties for every loaded element.');
-      if (fr && fr.list.size) {
-        for (const info of models) {
-          const record = fr.list.get(info.id);
-          if (!record) {
-            lines.push(`Model ${info.label} [${info.id}] could not be found in the fragments registry.`);
-            continue;
-          }
-          try {
-            const retrievedIds = await record.getLocalIds();
-            const localIds = Array.isArray(retrievedIds)
-              ? retrievedIds
-              : retrievedIds
-                ? Array.from(retrievedIds as Iterable<number>)
-                : [];
-            if (!localIds || localIds.length === 0) {
-              lines.push(`Model ${info.label} [${info.id}] has no retrievable local IDs.`);
-              continue;
-            }
-            lines.push(`Model ${info.label} [${info.id}] — enumerating ${localIds.length} items:`);
-            const detailLimit = localIds.length <= 40 ? 12 : localIds.length <= 120 ? 6 : 3;
-            const chunkSize = 50;
-            for (let offset = 0; offset < localIds.length; offset += chunkSize) {
-              const chunk = localIds.slice(offset, offset + chunkSize);
-              let batch: any[] = [];
-              try {
-                batch = await record.getItemsData(chunk, FRAGMENTS_ITEM_DATA_OPTIONS);
-              } catch (err) {
-                const start = chunk[0];
-                const end = chunk[chunk.length - 1];
-                lines.push(`  Failed to retrieve properties for items ${start}–${end}: ${(err as any)?.message ?? err}`);
-                continue;
-              }
-              chunk.forEach((localId, position) => {
-                const data = batch?.[position];
-                if (!data) {
-                  lines.push(`- localId:${localId} (no data available)`);
-                  return;
-                }
-                const summary = summariseItemDataForAI(data, detailLimit).replace(/\s+/g, ' ').trim();
-                lines.push(`- localId:${localId} | ${summary}`);
-              });
-            }
-          } catch (err) {
-            lines.push(`Failed to enumerate items for model ${info.label} [${info.id}]: ${(err as any)?.message ?? err}`);
-          }
-        }
-      } else {
-        lines.push('Fragments data is not available to enumerate model items.');
       }
     }
 
@@ -5859,7 +6179,7 @@ const App: React.FC = () => {
                               }}
                             >
                               <Typography variant="body2" color="text.secondary">
-                                Select an element in the viewer to view its Property Sets / NV_BIM / … breakdown.
+                                Select an element in the viewer to view its Property Sets… breakdown.
                               </Typography>
                             </Paper>
                           ) : hasSelectionSearch ? (
@@ -6629,6 +6949,144 @@ const App: React.FC = () => {
               </Alert>
             )}
           </Box>
+
+          {/* Grid Settings */}
+          <Box sx={{ mt: 0.5 }}>
+            <Typography variant="caption" sx={{ color: 'text.primary', fontWeight: 600, display: 'block', mb: 0.5 }}>
+              Grid Settings
+            </Typography>
+            
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              {/* Visibility Toggle */}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Tooltip title={gridVisible ? "Hide Grid" : "Show Grid"}>
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      const newVisible = !gridVisible;
+                      setGridVisible(newVisible);
+                      if (gridRef.current) gridRef.current.visible = newVisible;
+                    }}
+                    sx={{
+                      border: '1px solid',
+                      borderColor: gridVisible ? 'primary.main' : 'rgba(0,0,0,0.23)',
+                      bgcolor: gridVisible ? 'primary.main' : 'white',
+                      color: gridVisible ? 'white' : 'primary.main',
+                      '&:hover': {
+                        bgcolor: gridVisible ? 'primary.dark' : 'rgba(0,0,0,0.04)'
+                      }
+                    }}
+                  >
+                    {gridVisible ? <GridOnIcon fontSize="small" /> : <GridOffIcon fontSize="small" />}
+                  </IconButton>
+                </Tooltip>
+              </Box>
+              
+              {/* Grid Offset Slider */}
+              <Box sx={{ px: 1 }}>
+                <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem' }}>
+                  Offset: {gridOffset.toFixed(2)}m
+                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <input
+                    type="range"
+                    min="-5"
+                    max="5"
+                    step="0.1"
+                    value={gridOffset}
+                    onChange={async (e) => {
+                      const offset = parseFloat(e.target.value);
+                      setGridOffset(offset);
+                      
+                      const selectedLevel = levels.find(l => l.globalId === selectedLevelId);
+                      if (selectedLevel && gridRef.current && fragmentsRef.current) {
+                        // Get coordinate height from model (ThatOpen approach)
+                        let coordHeight = 0;
+                        for (const [modelId, model] of fragmentsRef.current.list) {
+                          if (typeof (model as any).getCoordinates === 'function') {
+                            try {
+                              const coords = await (model as any).getCoordinates();
+                              if (Array.isArray(coords) && coords.length >= 2) {
+                                coordHeight = coords[1];
+                                break;
+                              }
+                            } catch (e) {
+                              // Ignore
+                            }
+                          }
+                        }
+                        
+                        // Position at IFC level elevation + coordHeight + offset
+                        const gridElevation = selectedLevel.originalElevation + coordHeight + offset;
+                        const gridMesh = (gridRef.current as any).three;
+                        if (gridMesh && gridMesh.position) {
+                          gridMesh.position.y = gridElevation;
+                        }
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      cursor: 'pointer'
+                    }}
+                  />
+                </Box>
+              </Box>
+
+              {/* Level Selection */}
+              {levels.length > 0 && (
+                <FormControl size="small" fullWidth>
+                  <InputLabel id="grid-level-select-label" sx={{ fontSize: '0.75rem' }}>Align to Level</InputLabel>
+                  <Select
+                    labelId="grid-level-select-label"
+                    value={selectedLevelId}
+                    label="Align to Level"
+                    onChange={async (e) => {
+                      const levelId = e.target.value;
+                      setSelectedLevelId(levelId);
+                      
+                      // Position grid at the newly selected IFC level + coordHeight + current offset
+                      const selectedLevel = levels.find(l => l.globalId === levelId);
+                      if (selectedLevel && gridRef.current && fragmentsRef.current) {
+                        // Get coordinate height from model
+                        let coordHeight = 0;
+                        for (const [modelId, model] of fragmentsRef.current.list) {
+                          if (typeof (model as any).getCoordinates === 'function') {
+                            try {
+                              const coords = await (model as any).getCoordinates();
+                              if (Array.isArray(coords) && coords.length >= 2) {
+                                coordHeight = coords[1];
+                                break;
+                              }
+                            } catch (e) {
+                              // Ignore
+                            }
+                          }
+                        }
+                        
+                        const gridElevation = selectedLevel.originalElevation + coordHeight + gridOffset;
+                        const gridMesh = (gridRef.current as any).three;
+                        if (gridMesh && gridMesh.position) {
+                          gridMesh.position.y = gridElevation;
+                          
+                        }
+                      }
+                    }}
+                    sx={{ 
+                      fontSize: '0.75rem',
+                      height: '32px',
+                      '.MuiSelect-select': { py: 0.5 }
+                    }}
+                  >
+                    {levels.map((level) => (
+                      <MenuItem key={level.globalId} value={level.globalId} sx={{ fontSize: '0.75rem' }}>
+                        {level.name} ({level.elevation.toFixed(2)}m)
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              )}
+            </Box>
+          </Box>
           </Box> {/* Close content Box */}
         </Paper>
         </Draggable>
@@ -6788,7 +7246,7 @@ const App: React.FC = () => {
         <DialogTitle>About Savora Viewer</DialogTitle>
         <DialogContent dividers sx={{ maxHeight: '70vh', overflowY: 'auto' }}>
           <Typography variant="h6" gutterBottom>
-            Version 0.2.1 Preview
+            Version 0.2.3 Preview
           </Typography>
           
           <Typography variant="body2" color="text.secondary" paragraph>
@@ -6982,6 +7440,7 @@ const App: React.FC = () => {
             expandSignal={chatExpandSignal}
             onRequestSelection={handleAISelection}
             onOpenSettings={handleSettingsOpen}
+            configVersion={aiConfigVersion}
           />
         </Suspense>
 

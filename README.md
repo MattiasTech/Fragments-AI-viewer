@@ -4,88 +4,12 @@ A powerful web-based 3D viewer for BIM models with integrated IDS (Information D
 
 **All data is processed locally in the user's browser (PC, phone, tablet, etc.). Exception: AI Chat sends data to the configured AI provider. If AI Chat is not used, no model data leaves the user's device.** 
 
+## Recent Changes (v0.2.3)
 
-## Features
-
-### 🏗️ Model Viewing
-- **Multi-format support**: Load IFC (`.ifc`) and Fragments (`.frag`) files directly in the browser
-- **Multiple models**: Open and view multiple models simultaneously in one scene
-- **3D Navigation**: Orbit, pan, zoom with mouse controls
-- **Navigation cube**: Clickable cube for quick camera orientation
-- **View controls**: Fit to model, reset view, and focus on selections
-- **Ground grid**: Toggle grid display for better spatial orientation
-- **Performance monitoring**: Built-in FPS and renderer stats overlay
-
-### 📊 Model Explorer
-- **Interactive hierarchy**: Browse spatial structure (sites, buildings, stories, spaces)
-- **Model tree**: Expandable tree view of all loaded models
-- **Property inspection**: Click any element to view its properties
-- **Property organization**: View properties by sets (Pset, NV_BIM, etc.)
-- **Favorites system**: Star frequently-used properties for quick access
-- **Property search**: Real-time filtering of property lists
-- **Export capabilities**: Export properties to CSV format (selection or entire model)
-- **Copy functionality**: Copy raw element JSON data to clipboard
-- **Draggable panel**: Resizable Model Explorer window
-
-### ✅ IDS Checker (Validation)
-- **Load IDS files**: Import IDS XML definitions for validation
-- **Automated checking**: Validate models against IDS specifications
-- **Summary view**: Overview of pass/fail results by rule
-- **Detailed results**: Drill down into individual element validation
-- **Visual feedback**: Highlight passed (green) and failed (red) elements in 3D viewer
-- **Filtering**: Filter results by rule, status (pass/fail), or search term
-- **Export results**: Export validation results to CSV or JSON
-- **Rule isolation**: Isolate and fit camera to elements affected by specific rules
-- **Unicode normalization**: Handles en-dash vs hyphen character differences
-
-### 🔧 IDS Creator (Authoring)
-- **Create IDS files**: Author IDS specifications visually from models
-- **Multiple specifications**: Manage multiple specifications in one document
-- **Visual capture**: Select 3D elements to capture their properties as rules
-- **Applicability rules**: Define which elements specifications apply to
-- **Requirement rules**: Capture property requirements with operators (equals, contains, etc.)
-- **Property picker**: Browse and select specific properties from captured elements
-- **Rule editing**: Edit captured requirements with custom operators and values
-- **Copy functionality**: Copy applicability rules to requirements
-- **Direct validation**: Validate specifications immediately without export/import
-- **Customizable filenames**: Set filename in header before saving
-- **Load/Save**: Import existing IDS files for editing, save as `.ids` XML
-
-### 🤖 BIM AI Assistant
-- **Natural language queries**: Ask questions about your model in plain English
-- **Model analysis**: Get insights about elements, properties, and structure
-- **AI-powered responses**: Leverages OpenAI GPT for intelligent answers
-- **Context awareness**: AI has access to selected element properties
-- **Persistent chat**: Maintain conversation history across queries
-- **Draggable window**: Movable chat interface
-
-### 🎯 User Experience
-- **Floating toolbar**: Quick-access circular buttons for Explorer, IDS Checker, and IDS Creator
-- **Comprehensive tooltips**: Hover hints on all buttons and controls
-- **Collapsible sections**: Minimize panel sections to maximize workspace
-- **Resizable panels**: Drag panel corners to resize
-- **Dark theme**: Professional dark UI with Material Design components
-
-**Tech stack**: `React`, `Vite`, `Three.js`, `@thatopen/components`, `@thatopen/fragments`, `Material-UI`, `OpenAI API`
-
-## Prerequisites
-- **Node.js 18+** (LTS recommended)
-- **npm 9+**
-- **OpenAI API Key** (optional, required only for AI Assistant feature)
-
-Verify versions:
-
-```powershell
-node -v
-npm -v
-```
-
-### Google Gemini API Configuration
-To use the AI Assistant feature:
-
-1. Get an API key from Google AI.
-2. Configure the API key in your .env
-3. The AI Assistant uses the Gemini 2.5 light by default. You can modify the model in `ChatWindow.tsx` if needed.
+- **Parametric Filter 2.0:** Complete architecture rebuild. Features cascading dropdowns (dependent values), robust property fetching (Standard + Psets), and saved configurations.
+- **UI Enhancements:** Resizable panels for Filter and IDS tools. Corrected z-index layering for dialogs and dropdowns.
+- **IDS Creator Update:** "Edit Requirement" dropdowns now auto-populate with values from the selected example object.
+- **Bug Fixes:** Resolved issues with "Category only" filtering and boolean logic in rules.
 
 ## Usage Guide
 
@@ -138,7 +62,7 @@ To use the AI Assistant feature:
 
 ### Using the AI Assistant
 1. Click the **Chat** button in the top toolbar (or floating icon in the lower-right)
-2. Ensure you have your OpenAI API key configured
+2. Ensure you have your Google Gemini or OpenAI API key configured
 3. Select an element in the 3D viewer for context (optional)
 4. Type your question in natural language (e.g., "What fire rating does this wall have?")
 5. The AI will analyze your model and provide answers based on element properties
@@ -148,6 +72,7 @@ To use the AI Assistant feature:
   - Left click + drag: Rotate view
   - Right click + drag: Pan view
   - Scroll wheel: Zoom in/out
+  - Scroll wheel cklick: Pan view
   - Click element: Select and view properties
 
 - **Panel Management**:
@@ -167,95 +92,21 @@ To use the AI Assistant feature:
   - Filter validation results to focus on specific issues
   - Export validation results for sharing with team members
 
-## Install and run locally
-1) Install dependencies:
-
-```powershell
-npm install
-```
-
-2) Start the dev server:
-
-```powershell
-npm run dev
-```
-
-3) Open the app (Vite will print the local URL, commonly `http://localhost:5173`).
-
-4) Use the toolbar buttons or Model Explorer to load models and explore features.
-
-## Build for production
-Generate a static build in the `dist/` folder:
-
-```powershell
-npm run build
-```
-
-Optionally preview the build locally:
-
-```powershell
-npm run preview
-```
-
-## Deploy to GitHub Pages
-This project is preconfigured to deploy to GitHub Pages using the `gh-pages` branch.
-
-- Vite base path is set to the repo subpath in `vite.config.ts`:
-  - `base: '/savora-viewer/'`
-- Web-IFC assets are located at `public/web-ifc/` and are referenced using the Vite base URL at runtime.
-
-Deploy steps:
-
-1) Ensure your repo exists on GitHub and your local branch is pushed.
-2) Build and publish the site to `gh-pages`:
-
 ```powershell
 npm run deploy
 ```
-
-3) Configure GitHub Pages (one-time):
-   - On GitHub: `Settings` → `Pages`
-   - Build and deployment → Source: `Deploy from a branch`
-   - Branch: `gh-pages` and Folder: `/ (root)`
-
-4) Your site will be available at:
-  - `https://<your-username>.github.io/savora-viewer/`
-  - For this repo: `https://savytechlabs.github.io/savora-viewer/`
-
-Notes:
-- If you fork or rename the repository, update `base` in `vite.config.ts` to match the new repo name, then `npm run build` and `npm run deploy` again.
-- If you switch to a custom domain, set `base: '/'` and configure your DNS and a `CNAME` file in the `public/` folder (advanced).
 
 ## Known Issues & Limitations
 - **Memory Usage**: Multiple large models loaded simultaneously may cause memory issues in some browsers.
 - **Unicode Characters**: Some property names with special characters (en-dash vs hyphen) are normalized for validation accuracy.
 - **Browser Compatibility**: Best experience on Chrome/Edge. Firefox and Safari are supported but may have minor rendering differences.
-- **AI Assistant**: Requires valid Google Gemini API key in .env local file and internet connection. Responses depend on API availability and rate limits.
+- **AI Assistant**: Requires valid Google Gemini API key or OpenAI API key and internet connection. Responses depend on API availability and rate limits.
 
 ## Troubleshooting
-
-### Deployment Issues
-- **404s for CSS/JS on GitHub Pages**:
-  - Ensure `vite.config.ts` has `base: '/savora-viewer/'` (exactly matching the repo name) and redeploy.
-  
-- **404 right after deploying**:
-  - Pages sometimes takes a minute to publish—wait and hard refresh (Ctrl+F5).
-
-### Model Loading Issues
-  - Check browser console for specific error messages.
-  
+ 
 - **Properties not showing**:
   - Some IFC files may have incomplete or non-standard property structures.
   - Try clicking different elements to ensure proper selection.
-
-### Build Issues
-- **TypeScript type errors during build**:
-  ```powershell
-  npm i -D @types/react @types/react-dom @types/node
-  ```
-
-- **Worker or WASM errors when opened from `file://`**:
-  - Always use `npm run dev` or another HTTP server; browsers restrict Workers/WASM over `file://`.
 
 ### IDS Validation Issues
 - **Validation not running**:
@@ -264,16 +115,6 @@ Notes:
   
 - **Elements not highlighting**:
   - Some older `.frag` files may not support highlighting.
-  - Check console for warnings about highlight capabilities.
-
-### AI Assistant Issues
-- **No response from AI**:
-  -  Now only availabel in local dev mode. Investigating multi user support ongoing.
-  - Verify Gemini API key is correctly configured in .env local file.
-  - Check browser console for API errors (rate limits, invalid key, etc.).
-  - Ensure internet connection is active.
-
-
 
 ### Key Technologies
 - **React 18** with TypeScript for UI components
@@ -284,19 +125,14 @@ Notes:
 - **Zustand** for lightweight state management
 - **IndexedDB** for client-side IDS data persistence
 - **Web Workers** for non-blocking validation and property extraction
-- **OpenAI API** for AI-powered assistance
+- **AI API:s** for AI-powered assistance
 
 ## Roadmap
 
 Planned features and improvements:
 
-- [ ] **Enhanced Measurement**: Distance, area, and volume measurement tools
-- [ ] **Annotations**: Add comments and markups to 3D elements
-- [ ] **Comparison Mode**: Visual diff between model versions
-- [ ] **Advanced IDS Editor**: Visual rule builder with drag-and-drop
-- [ ] **Collaboration**: Share annotations and validation results with team
-- [ ] **Custom Property Mappings**: Map non-standard property schemas
-- [ ] **Performance Optimizations**: LOD (Level of Detail) and frustum culling improvements
+- [ ] **QTO**: Extract QTO from the model and add cost and labor hours.
+- [ ] **MCP**: Use MCP server to feed LLM with information in a more efficient way then trad.
 
 ## Contributing
 
